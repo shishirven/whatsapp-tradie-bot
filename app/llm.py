@@ -164,9 +164,7 @@ class GeminiQualifier:
         if client is not None:
             self.client = client
         else:
-            from google import genai
-
-            self.client = genai.Client(api_key=api_key)
+            self.client = gemini_client(api_key)
 
     def qualify(self, turn: TurnContext) -> QualificationDraft:
         try:
@@ -190,12 +188,12 @@ class GeminiQualifier:
                 ),
             )
         except Exception as exc:
-            _log_gemini_failure("qualify", exc)
+            log_gemini_failure("qualify", exc, self.model)
             return self._offline.qualify(turn)
         try:
             return parse_gemini_qualification(response)
         except Exception as exc:
-            _log_gemini_failure("qualify parse", exc)
+            log_gemini_failure("qualify parse", exc, self.model)
             return self._offline.qualify(turn)
 
 
@@ -531,11 +529,55 @@ def _gemini_texts(response) -> list[str]:
     return []
 
 
-def _log_gemini_failure(where: str, exc: Exception) -> None:
-    if _is_rate_limit(exc):
-        logger.warning("gemini %s hit a rate limit; using the offline qualifier: %s", where, exc)
+GEMINI_REQUEST_TIMEOUT_MS = 20_000
+
+
+def gemini_client(api_key: str):
+    """One Gemini client. Each request waits at most 20s and is not retried.
+
+    The SDK's default HTTP timeout is unlimited, so a long thinking pass holds
+    the webhook until the model finishes. A 404 is not retried either. After
+    the timeout the caller falls back to the offline qualifier.
+    """
+    from google import genai
+    from google.genai import types
+
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=GEMINI_REQUEST_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
+
+
+def log_gemini_failure(where: str, exc: Exception, model: str) -> None:
+    if _is_not_found(exc):
+        logger.error(
+            "Gemini model %s returned 404 NOT_FOUND and is not available to this key. "
+            "Set GEMINI_MODEL to a current model id (the default is gemini-3.8-flash). %s",
+            model,
+            exc,
+        )
         return
-    logger.exception("gemini %s failed; using the offline qualifier", where)
+    if _is_rate_limit(exc):
+        logger.warning(
+            "gemini %s hit a rate limit for model %s; using the offline qualifier: %s",
+            where,
+            model,
+            exc,
+        )
+        return
+    logger.exception("gemini %s failed for model %s; using the offline qualifier", where, model)
+
+
+def _is_not_found(exc: Exception) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    status = str(getattr(exc, "status", "") or "")
+    if code == 404 or status.upper() == "NOT_FOUND":
+        return True
+    text = str(exc).lower()
+    return ("404" in text and "not_found" in text) or "no longer available" in text
 
 
 def _is_rate_limit(exc: Exception) -> bool:

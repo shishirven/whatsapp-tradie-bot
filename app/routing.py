@@ -205,9 +205,9 @@ class GeminiIntentClassifier:
         if client is not None:
             self.client = client
         else:
-            from google import genai
+            from app.llm import gemini_client
 
-            self.client = genai.Client(api_key=api_key)
+            self.client = gemini_client(api_key)
 
     def classify(self, text: str, job_summary: str = "") -> bool:
         try:
@@ -226,10 +226,9 @@ class GeminiIntentClassifier:
                 ),
             )
         except Exception as exc:
-            if _rate_limited(exc):
-                logger.warning("gemini intent hit a rate limit; using the phrase list: %s", exc)
-            else:
-                logger.exception("gemini intent failed; using the phrase list")
+            from app.llm import log_gemini_failure
+
+            log_gemini_failure("intent", exc, self.model)
             return self._offline.classify(text, job_summary=job_summary)
         return _is_yes(_response_text(response))
 
@@ -240,7 +239,7 @@ def build_intent(
     model: str,
     *,
     gemini_api_key: str = "",
-    gemini_model: str = "gemini-2.5-flash",
+    gemini_model: str = "gemini-3.8-flash",
 ):
     if llm_provider == "gemini" and gemini_api_key:
         return GeminiIntentClassifier(gemini_api_key, gemini_model)
@@ -385,14 +384,6 @@ def _response_text(response) -> str:
             if piece:
                 chunks.append(str(piece))
     return " ".join(chunks)
-
-
-def _rate_limited(exc: Exception) -> bool:
-    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if code == 429:
-        return True
-    text = str(exc).lower()
-    return "429" in text or "resource_exhausted" in text or "rate limit" in text or "quota" in text
 
 
 def _norm_address(value: object) -> str | None:
