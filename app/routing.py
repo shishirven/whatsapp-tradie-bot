@@ -196,7 +196,54 @@ class LLMIntentClassifier:
         return _is_yes(" ".join(chunks))
 
 
-def build_intent(llm_provider: str, api_key: str, model: str):
+class GeminiIntentClassifier:
+    """One short Gemini call. A 429 or other API error uses the phrase list."""
+
+    def __init__(self, api_key: str, model: str, client=None) -> None:
+        self.model = model
+        self._offline = KeywordIntentClassifier()
+        if client is not None:
+            self.client = client
+        else:
+            from google import genai
+
+            self.client = genai.Client(api_key=api_key)
+
+    def classify(self, text: str, job_summary: str = "") -> bool:
+        try:
+            from google.genai import types
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=(
+                    f"Open job: {job_summary or 'unspecified'}\n"
+                    f"Message:\n{text or ''}"
+                ),
+                config=types.GenerateContentConfig(
+                    system_instruction=_INTENT_SYSTEM,
+                    max_output_tokens=16,
+                    temperature=0,
+                ),
+            )
+        except Exception as exc:
+            if _rate_limited(exc):
+                logger.warning("gemini intent hit a rate limit; using the phrase list: %s", exc)
+            else:
+                logger.exception("gemini intent failed; using the phrase list")
+            return self._offline.classify(text, job_summary=job_summary)
+        return _is_yes(_response_text(response))
+
+
+def build_intent(
+    llm_provider: str,
+    api_key: str,
+    model: str,
+    *,
+    gemini_api_key: str = "",
+    gemini_model: str = "gemini-2.5-flash",
+):
+    if llm_provider == "gemini" and gemini_api_key:
+        return GeminiIntentClassifier(gemini_api_key, gemini_model)
     if llm_provider == "anthropic" and api_key:
         return LLMIntentClassifier(api_key, model)
     return KeywordIntentClassifier()
@@ -320,6 +367,32 @@ def evaluate_soft_match(
 def _is_yes(text: str) -> bool:
     token = " ".join((text or "").upper().split())
     return token.startswith("YES")
+
+
+def _response_text(response) -> str:
+    try:
+        text = getattr(response, "text", None)
+    except Exception:
+        text = None
+    if isinstance(text, str) and text.strip():
+        return text
+    chunks: list[str] = []
+    for candidate in getattr(response, "candidates", None) or []:
+        content = candidate.get("content") if isinstance(candidate, dict) else getattr(candidate, "content", None)
+        parts = content.get("parts") if isinstance(content, dict) else getattr(content, "parts", None)
+        for part in parts or []:
+            piece = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if piece:
+                chunks.append(str(piece))
+    return " ".join(chunks)
+
+
+def _rate_limited(exc: Exception) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code == 429:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "resource_exhausted" in text or "rate limit" in text or "quota" in text
 
 
 def _norm_address(value: object) -> str | None:

@@ -392,6 +392,7 @@ def test_from_env_defaults(monkeypatch, tmp_path):
     from app.config import Settings
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "env.db"))
     assert Settings.from_env().llm_provider == "mock"

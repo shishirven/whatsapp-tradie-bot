@@ -19,7 +19,7 @@ from app.business import load_business
 from app.config import Settings
 from app.customers_io import ImportResult, import_csv_text
 from app.db import Database
-from app.llm import AnthropicQualifier, MissingKeyQualifier, RuleBasedQualifier
+from app.llm import AnthropicQualifier, GeminiQualifier, MissingKeyQualifier, RuleBasedQualifier
 from app.media import (
     GraphMediaDownloader,
     OpenAIWhisperTranscriber,
@@ -80,8 +80,16 @@ class ChatIn(BaseModel):
 def build_qualifier(settings: Settings, business):
     if settings.llm_provider == "mock":
         return RuleBasedQualifier(business)
+    if settings.llm_provider == "gemini":
+        if not settings.gemini_api_key:
+            return MissingKeyQualifier("gemini")
+        return GeminiQualifier(
+            settings.gemini_api_key,
+            settings.gemini_model,
+            business=business,
+        )
     if not settings.anthropic_api_key:
-        return MissingKeyQualifier()
+        return MissingKeyQualifier("anthropic")
     return AnthropicQualifier(settings.anthropic_api_key, settings.anthropic_model)
 
 
@@ -108,6 +116,12 @@ def build_transcriber(settings: Settings):
 
 
 def llm_status(settings: Settings, qualifier) -> dict:
+    if isinstance(qualifier, GeminiQualifier):
+        return {
+            "provider": "gemini",
+            "model": settings.gemini_model,
+            "label": f"Gemini · {settings.gemini_model}",
+        }
     if isinstance(qualifier, AnthropicQualifier):
         return {
             "provider": "anthropic",
@@ -115,6 +129,12 @@ def llm_status(settings: Settings, qualifier) -> dict:
             "label": f"Claude · {settings.anthropic_model}",
         }
     if isinstance(qualifier, MissingKeyQualifier):
+        if qualifier.provider == "gemini":
+            return {
+                "provider": "unconfigured",
+                "model": settings.gemini_model,
+                "label": "Gemini is selected, but GEMINI_API_KEY is empty",
+            }
         return {
             "provider": "unconfigured",
             "model": settings.anthropic_model,
@@ -150,7 +170,11 @@ def create_app(
     media_downloader = media_downloader if media_downloader is not None else build_media(settings)
     transcriber = transcriber if transcriber is not None else build_transcriber(settings)
     intent = intent if intent is not None else build_intent(
-        settings.llm_provider, settings.anthropic_api_key, settings.anthropic_model
+        settings.llm_provider,
+        settings.anthropic_api_key,
+        settings.anthropic_model,
+        gemini_api_key=settings.gemini_api_key,
+        gemini_model=settings.gemini_model,
     )
 
     app = FastAPI(title=f"{business.name} jobs", docs_url="/docs")

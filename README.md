@@ -59,7 +59,7 @@ flowchart TD
 
 A number is known when it is already in `customer_numbers` — including clients imported from CSV. An open job is `open`, `quoted`, or `booked`. `completed` and `cancelled` are closed, so the next message starts a new job.
 
-Follow-up on an open job answers a status question from that job's booking, attaches a photo or voice note, or hands the chat to the tradie. It does not run the intake questions again after handoff. "Clearly a new job" is classified by Claude when `LLM_PROVIDER=anthropic`. With no key, a phrase list is the stand-in (`different job`, `another job`, and similar). Tests pass a fake classifier and never call Anthropic.
+Follow-up on an open job answers a status question from that job's booking, attaches a photo or voice note, or hands the chat to the tradie. It does not run the intake questions again after handoff. "Clearly a new job" is classified by Gemini when `LLM_PROVIDER=gemini`, and by Claude when `LLM_PROVIDER=anthropic`. With no key, a phrase list is the stand-in (`different job`, `another job`, and similar). Tests pass a fake classifier and never call Gemini or Anthropic.
 
 Job source is one of `ad`, `organic`, `website`, `qr`, or `repeat`. A Meta referral is `ad`, and the first reply names the headline and campaign. A configured prefilled tag in `config/business.json` (`(web)`, `(qr)`, and whatever you add under `source_tags`) sets `website` or `qr` and is removed before the qualifier reads the text. A known number with neither is `repeat`. Anything else is `organic`.
 
@@ -81,9 +81,11 @@ Quotes are a min–max range from `config/business.json`. They are saved as draf
 
 Visit times come from `Calendar`. With Google credentials that is the Calendar API (service account or OAuth). Without them, bookings live in SQLite so the simulator still works. The customer is offered the next three free slots inside the configured hours, and the slot they pick is booked.
 
-Claude Sonnet 5.5 does not accept a forced tool choice (`tool_choice` of `any` or `tool` returns 400). The call uses `tool_choice: auto`, a strict schema, and a prompt that tells the assistant to call `record_job_intake` every turn. `thinking` is `between_tools`. If the model replies in plain text anyway, that text is sent and no new facts are written. Any sentence that still contains a price is removed before send.
+Gemini is the recommended reader. It calls `record_job_intake` on every turn (`function_calling_config` mode ANY) and returns the WhatsApp reply plus the job facts. The same scrubber removes any sentence that still contains a price before send. A free-tier 429, or any other Gemini error, uses the offline qualifier for that turn so the webhook still answers.
 
-With no API key, `LLM_PROVIDER` defaults to `mock`: a keyword extractor in `app/extract.py`. It is there so you can click through the product. It is not the reader you ship.
+Claude stays available. Sonnet 5.5 does not accept a forced tool choice (`tool_choice` of `any` or `tool` returns 400). That call uses `tool_choice: auto`, a strict schema, and a prompt that tells the assistant to call `record_job_intake` every turn. `thinking` is `between_tools`. If the model replies in plain text anyway, that text is sent and no new facts are stored.
+
+With no API key, `LLM_PROVIDER` defaults to `mock`: a keyword extractor in `app/extract.py`. It is there so you can click through the product. It is not the reader you ship. If `LLM_PROVIDER` is unset and `GEMINI_API_KEY` is set, Gemini is selected. An Anthropic key alone still selects Claude.
 
 ## Run it locally
 
@@ -99,16 +101,25 @@ On Windows, activate with `.venv\Scripts\activate`.
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Pick a sample ad, chat, and watch the job card. The desk is [http://127.0.0.1:8000/staff](http://127.0.0.1:8000/staff). Interactive API docs are at `/docs`.
 
-To answer with Claude:
+To answer with Gemini, create a free key at [Google AI Studio](https://aistudio.google.com/apikey) and set:
+
+```bash
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+```
+
+The default model is `gemini-2.5-flash` (`GEMINI_MODEL`). Google has said that from 1 December 2026 requests to that id route to `gemini-3.5-flash-lite`. Set `GEMINI_MODEL` if you want a different id. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
+
+To answer with Claude instead:
 
 ```bash
 LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The default model is `claude-sonnet-5-5` (`ANTHROPIC_MODEL`).
+The Claude model is `claude-sonnet-5-5` (`ANTHROPIC_MODEL`).
 
-Tests do not call Anthropic, OpenAI, Meta, or Google. They pass fakes:
+Tests do not call Anthropic, Gemini, OpenAI, Meta, or Google. They pass fakes:
 
 ```bash
 pytest
@@ -135,7 +146,7 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 4. Deploy. The service URL is `https://<service>.onrender.com`.
 5. In Meta, set the callback URL to `https://<service>.onrender.com/webhook`.
 
-`MESSAGING_PROVIDER` is `whatsapp` and `LLM_PROVIDER` is `anthropic` in the blueprint. Until `WHATSAPP_TOKEN` and `PHONE_NUMBER_ID` are set, outbound sends are skipped and logged; inbound messages are still stored.
+`MESSAGING_PROVIDER` is `whatsapp` and `LLM_PROVIDER` is `gemini` in the blueprint. Until `WHATSAPP_TOKEN` and `PHONE_NUMBER_ID` are set, outbound sends are skipped and logged; inbound messages are still stored. Until `GEMINI_API_KEY` is set, the reply says that key is empty.
 
 ## Environment variables
 
@@ -145,6 +156,8 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `PHONE_NUMBER_ID` | WhatsApp phone number id. `WHATSAPP_PHONE_NUMBER_ID` is also accepted |
 | `VERIFY_TOKEN` | String you type into the Meta webhook form. `WHATSAPP_VERIFY_TOKEN` is also accepted |
 | `APP_SECRET` | Meta app secret. When set, `POST /webhook` must carry a valid `X-Hub-Signature-256`. `WHATSAPP_APP_SECRET` is also accepted |
+| `GEMINI_API_KEY` | Gemini. Required when `LLM_PROVIDER=gemini`. Free key from [AI Studio](https://aistudio.google.com/apikey) |
+| `GEMINI_MODEL` | Defaults to `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | Claude. Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | Defaults to `claude-sonnet-5-5` |
 | `OPENAI_API_KEY` | Whisper. Voice notes are stored without a transcript until this is set |
@@ -161,7 +174,7 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `BUSINESS_CONFIG` | Optional path to a different `business.json` |
 | `SQLITE_PATH` | Defaults to `data/tradie.db`. On Render, `/data/tradie.db` |
 | `MESSAGING_PROVIDER` | `simulated` or `whatsapp` |
-| `LLM_PROVIDER` | `mock` or `anthropic` |
+| `LLM_PROVIDER` | `gemini` (recommended), `anthropic`, or `mock` |
 
 Use either the service account or the OAuth trio. If both are set, the service account wins. If neither is set, slots are booked into SQLite only.
 
@@ -259,14 +272,15 @@ Then open `/staff`. With `APP_SECRET` set, compute `X-Hub-Signature-256` or the 
 | `app/booking.py` | Slot finder and the calendar interface |
 | `app/window.py` | 24-hour window and template-name stubs |
 | `app/media.py` | Graph download and the Whisper transcriber |
-| `app/llm.py` | Claude tool call, and the offline qualifier |
+| `app/llm.py` | Gemini and Claude tool calls, and the offline qualifier |
 | `app/messaging.py` | Gateway, signature check, webhook parser |
 
 ## What you still do yourself
 
 - Meta business verification, the phone number, the permanent token, and the webhook subscription to **messages**
 - Approved template names for `booking_confirmation` and `quote_followup`
-- Anthropic and OpenAI keys
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey), with `LLM_PROVIDER=gemini`. Claude is optional
+- An OpenAI key if you want voice notes transcribed
 - A Google calendar shared with the service account, or an OAuth refresh token
 - Staff username and password
 - Your own business name, suburbs, job types, hours, price bands, and source tags in `config/business.json`
