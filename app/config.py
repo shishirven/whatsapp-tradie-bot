@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-_LLM_PROVIDERS = {"mock", "anthropic"}
+_LLM_PROVIDERS = {"mock", "anthropic", "gemini"}
+_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 _MESSAGING_PROVIDERS = {"simulated", "whatsapp"}
 
 
@@ -35,6 +36,8 @@ class Settings:
     staff_password: str = ""
     staff_session_secret: str = ""
     business_config_path: str = ""
+    gemini_api_key: str = ""
+    gemini_model: str = _DEFAULT_GEMINI_MODEL
 
     def __post_init__(self) -> None:
         if self.llm_provider not in _LLM_PROVIDERS:
@@ -56,10 +59,17 @@ class Settings:
         # Do not override variables already set in the process environment.
         load_dotenv(override=False)
         key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        gemini_key = _env("GEMINI_API_KEY")
         provider = os.getenv("LLM_PROVIDER", "").strip().lower()
         if not provider:
-            # A fresh clone with no key still answers, via the offline qualifier.
-            provider = "anthropic" if key else "mock"
+            # Gemini is the recommended provider when its key is set. Claude is
+            # next. A fresh clone with neither key still answers offline.
+            if gemini_key:
+                provider = "gemini"
+            elif key:
+                provider = "anthropic"
+            else:
+                provider = "mock"
         return cls(
             anthropic_api_key=key,
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5").strip()
@@ -87,6 +97,9 @@ class Settings:
             staff_password=_env("STAFF_PASSWORD"),
             staff_session_secret=_env("STAFF_SESSION_SECRET"),
             business_config_path=_env("BUSINESS_CONFIG"),
+            gemini_api_key=gemini_key,
+            gemini_model=os.getenv("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL).strip()
+            or _DEFAULT_GEMINI_MODEL,
         )
 
 

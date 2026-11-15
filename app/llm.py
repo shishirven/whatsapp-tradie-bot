@@ -1,6 +1,11 @@
-"""Qualifiers: Claude via tool use, and a keyword stand-in for offline demos.
+"""Qualifiers: Gemini or Claude via a tool call, and a keyword stand-in.
 
-Claude Sonnet 5.5 rejects forced tool choice (`tool_choice` any/tool). The
+Gemini is the recommended provider. It is forced to call `record_job_intake`
+(`function_calling_config` mode ANY) so each turn returns a reply plus facts.
+A rate limit or any other Gemini error uses the offline qualifier for that
+turn instead of failing the webhook.
+
+Claude Sonnet 5.5 rejects forced tool choice (`tool_choice` any/tool). That
 call uses `auto` plus a strict schema, and the prompt tells the assistant to
 call the tool every turn. If the model answers in plain text anyway, that
 text is the reply and no new facts are stored.
@@ -150,6 +155,50 @@ class AnthropicQualifier:
         return parse_qualification(response)
 
 
+class GeminiQualifier:
+    """Gemini function call. A 429 or any other API error uses the offline qualifier."""
+
+    def __init__(self, api_key: str, model: str, client=None, business: Business | None = None) -> None:
+        self.model = model
+        self._offline = RuleBasedQualifier(business)
+        if client is not None:
+            self.client = client
+        else:
+            from google import genai
+
+            self.client = genai.Client(api_key=api_key)
+
+    def qualify(self, turn: TurnContext) -> QualificationDraft:
+        try:
+            from google.genai import types
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=to_gemini_contents(turn.history[-_MAX_HISTORY:]),
+                config=types.GenerateContentConfig(
+                    system_instruction=turn.system,
+                    tools=[_gemini_tool()],
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    tool_config=types.ToolConfig(
+                        function_calling_config=types.FunctionCallingConfig(
+                            mode="ANY",
+                            allowed_function_names=[QUALIFY_TOOL["name"]],
+                        )
+                    ),
+                    max_output_tokens=1500,
+                    temperature=0,
+                ),
+            )
+        except Exception as exc:
+            _log_gemini_failure("qualify", exc)
+            return self._offline.qualify(turn)
+        try:
+            return parse_gemini_qualification(response)
+        except Exception as exc:
+            _log_gemini_failure("qualify parse", exc)
+            return self._offline.qualify(turn)
+
+
 class RuleBasedQualifier:
     """Offline practice qualifier. Keyword extraction plus a fixed question order."""
 
@@ -187,16 +236,24 @@ class RuleBasedQualifier:
 
 
 class MissingKeyQualifier:
-    """Used when LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty."""
+    """Used when a provider is selected but its API key is empty."""
+
+    def __init__(self, provider: str = "anthropic") -> None:
+        self.provider = provider
 
     def qualify(self, turn: TurnContext) -> QualificationDraft:
-        return QualificationDraft(
-            reply=(
+        if self.provider == "gemini":
+            reply = (
+                "Gemini is selected (LLM_PROVIDER=gemini) but GEMINI_API_KEY is empty. "
+                "Create a free key at https://aistudio.google.com/apikey and add it to your .env file, "
+                "or unset LLM_PROVIDER to use the offline qualifier."
+            )
+        else:
+            reply = (
                 "Claude is selected (LLM_PROVIDER=anthropic) but ANTHROPIC_API_KEY is empty. "
                 "Add the key to your .env file, or unset LLM_PROVIDER to use the offline qualifier."
-            ),
-            raw={"unconfigured": True},
-        )
+            )
+        return QualificationDraft(reply=reply, raw={"unconfigured": True})
 
 
 def parse_qualification(response) -> QualificationDraft:
@@ -217,6 +274,29 @@ def parse_qualification(response) -> QualificationDraft:
     reply = " ".join(piece.strip() for piece in texts if piece and piece.strip())
     if not reply:
         logger.warning("model returned no tool call and no text")
+        reply = _FALLBACK_REPLY
+    return QualificationDraft(reply=reply, raw={"unstructured": True})
+
+
+def to_gemini_contents(history: list[dict]) -> list[dict]:
+    """Gemini roles are user and model. The first turn must be a user turn."""
+    contents = []
+    for message in to_api_messages(history):
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": message["content"]}]})
+    return contents
+
+
+def parse_gemini_qualification(response) -> QualificationDraft:
+    """Read a function call, or the plain text if the model did not call one."""
+    texts = _gemini_texts(response)
+    for call in _gemini_function_calls(response):
+        name = call.get("name")
+        if name == QUALIFY_TOOL["name"]:
+            return _draft_from_tool(call.get("args") or {}, texts)
+    reply = " ".join(piece.strip() for piece in texts if piece and piece.strip())
+    if not reply:
+        logger.warning("gemini returned no function call and no text")
         reply = _FALLBACK_REPLY
     return QualificationDraft(reply=reply, raw={"unstructured": True})
 
@@ -371,3 +451,96 @@ def _clean_bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return False
+
+
+def _gemini_tool():
+    from google.genai import types
+
+    properties = {}
+    for name, spec in QUALIFY_TOOL["input_schema"]["properties"].items():
+        schema = {"description": spec.get("description") or ""}
+        if spec.get("type") == "boolean":
+            schema["type"] = "boolean"
+        elif spec.get("type") == "string":
+            schema["type"] = "string"
+        else:
+            schema["type"] = "string"
+            schema["nullable"] = True
+        properties[name] = schema
+    declaration = types.FunctionDeclaration(
+        name=QUALIFY_TOOL["name"],
+        description=QUALIFY_TOOL["description"],
+        parameters_json_schema={
+            "type": "object",
+            "properties": properties,
+            "required": list(QUALIFY_TOOL["input_schema"]["required"]),
+        },
+    )
+    return types.Tool(function_declarations=[declaration])
+
+
+def _gemini_function_calls(response) -> list[dict]:
+    found = []
+    calls = getattr(response, "function_calls", None) or []
+    for call in calls:
+        found.append(_call_dict(call))
+    if found:
+        return found
+    for candidate in getattr(response, "candidates", None) or []:
+        content = candidate.get("content") if isinstance(candidate, dict) else getattr(candidate, "content", None)
+        parts = content.get("parts") if isinstance(content, dict) else getattr(content, "parts", None)
+        for part in parts or []:
+            call = part.get("function_call") if isinstance(part, dict) else getattr(part, "function_call", None)
+            if call:
+                found.append(_call_dict(call))
+    return found
+
+
+def _call_dict(call) -> dict:
+    if isinstance(call, dict):
+        name = call.get("name")
+        args = call.get("args") or {}
+    else:
+        name = getattr(call, "name", None)
+        args = getattr(call, "args", None) or {}
+    if not isinstance(args, dict):
+        try:
+            args = dict(args)
+        except (TypeError, ValueError):
+            args = {}
+    return {"name": name, "args": args}
+
+
+def _gemini_texts(response) -> list[str]:
+    texts: list[str] = []
+    for candidate in getattr(response, "candidates", None) or []:
+        content = candidate.get("content") if isinstance(candidate, dict) else getattr(candidate, "content", None)
+        parts = content.get("parts") if isinstance(content, dict) else getattr(content, "parts", None)
+        for part in parts or []:
+            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if text:
+                texts.append(str(text))
+    if texts:
+        return texts
+    try:
+        text = getattr(response, "text", None)
+    except Exception:
+        text = None
+    if isinstance(text, str) and text.strip():
+        return [text]
+    return []
+
+
+def _log_gemini_failure(where: str, exc: Exception) -> None:
+    if _is_rate_limit(exc):
+        logger.warning("gemini %s hit a rate limit; using the offline qualifier: %s", where, exc)
+        return
+    logger.exception("gemini %s failed; using the offline qualifier", where)
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code == 429:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "resource_exhausted" in text or "rate limit" in text or "quota" in text

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -17,8 +17,9 @@ from app.auth import COOKIE, auth_enabled, credentials_match, issue_session, rea
 from app.booking import build_calendar
 from app.business import load_business
 from app.config import Settings
+from app.customers_io import ImportResult, import_csv_text
 from app.db import Database
-from app.llm import AnthropicQualifier, MissingKeyQualifier, RuleBasedQualifier
+from app.llm import AnthropicQualifier, GeminiQualifier, MissingKeyQualifier, RuleBasedQualifier
 from app.media import (
     GraphMediaDownloader,
     OpenAIWhisperTranscriber,
@@ -33,6 +34,7 @@ from app.messaging import (
     verify_meta_signature,
 )
 from app.notify import LogNotifier
+from app.routing import JOB_STATUSES, build_intent
 from app.service import (
     HANDOFF_LABELS,
     QuoteNotReady,
@@ -78,8 +80,16 @@ class ChatIn(BaseModel):
 def build_qualifier(settings: Settings, business):
     if settings.llm_provider == "mock":
         return RuleBasedQualifier(business)
+    if settings.llm_provider == "gemini":
+        if not settings.gemini_api_key:
+            return MissingKeyQualifier("gemini")
+        return GeminiQualifier(
+            settings.gemini_api_key,
+            settings.gemini_model,
+            business=business,
+        )
     if not settings.anthropic_api_key:
-        return MissingKeyQualifier()
+        return MissingKeyQualifier("anthropic")
     return AnthropicQualifier(settings.anthropic_api_key, settings.anthropic_model)
 
 
@@ -106,6 +116,12 @@ def build_transcriber(settings: Settings):
 
 
 def llm_status(settings: Settings, qualifier) -> dict:
+    if isinstance(qualifier, GeminiQualifier):
+        return {
+            "provider": "gemini",
+            "model": settings.gemini_model,
+            "label": f"Gemini · {settings.gemini_model}",
+        }
     if isinstance(qualifier, AnthropicQualifier):
         return {
             "provider": "anthropic",
@@ -113,6 +129,12 @@ def llm_status(settings: Settings, qualifier) -> dict:
             "label": f"Claude · {settings.anthropic_model}",
         }
     if isinstance(qualifier, MissingKeyQualifier):
+        if qualifier.provider == "gemini":
+            return {
+                "provider": "unconfigured",
+                "model": settings.gemini_model,
+                "label": "Gemini is selected, but GEMINI_API_KEY is empty",
+            }
         return {
             "provider": "unconfigured",
             "model": settings.anthropic_model,
@@ -135,6 +157,7 @@ def create_app(
     media_downloader=None,
     transcriber=None,
     now=None,
+    intent=None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     clock = now or (lambda: datetime.now(timezone.utc))
@@ -146,6 +169,13 @@ def create_app(
     calendar = calendar if calendar is not None else build_calendar(settings, db)
     media_downloader = media_downloader if media_downloader is not None else build_media(settings)
     transcriber = transcriber if transcriber is not None else build_transcriber(settings)
+    intent = intent if intent is not None else build_intent(
+        settings.llm_provider,
+        settings.anthropic_api_key,
+        settings.anthropic_model,
+        gemini_api_key=settings.gemini_api_key,
+        gemini_model=settings.gemini_model,
+    )
 
     app = FastAPI(title=f"{business.name} jobs", docs_url="/docs")
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
@@ -271,9 +301,88 @@ def create_app(
             {
                 "title": "Jobs",
                 "active": "staff",
+            "business": business,
+            "leads": jobs,
+            "banner": business.banner,
+            "auth_enabled": auth_enabled(settings),
+        },
+    )
+
+    def customer_page(request: Request, import_result: ImportResult | None = None):
+        customers = []
+        for row in db.list_customers():
+            numbers = db.list_numbers(row["id"])
+            customers.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "notes": row["notes"],
+                    "trusted": bool(row["trusted"]),
+                    "addresses": _json_list(row.get("addresses_json")),
+                    "numbers": [item["wa_id"] for item in numbers],
+                    "job_count": len(db.list_jobs_for_customer(row["id"])),
+                }
+            )
+        return templates.TemplateResponse(
+            request,
+            "customers.html",
+            {
+                "title": "Customers",
+                "active": "customers",
                 "business": business,
-                "leads": jobs,
-                "banner": business.banner,
+                "customers": customers,
+                "import_result": import_result,
+                "auth_enabled": auth_enabled(settings),
+            },
+        )
+
+    @app.get("/staff/customers", response_class=HTMLResponse)
+    def staff_customers(request: Request):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        return customer_page(request)
+
+    @app.post("/staff/customers/import", response_class=HTMLResponse)
+    async def staff_import_customers(request: Request, file: UploadFile = File(...)):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        raw = await file.read()
+        if not raw:
+            result = ImportResult(errors=["Choose a CSV file."])
+        else:
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                result = ImportResult(errors=["CSV must be UTF-8."])
+            else:
+                try:
+                    result = import_csv_text(db, text)
+                except ValueError as exc:
+                    result = ImportResult(errors=[str(exc)])
+        return customer_page(request, result)
+
+    @app.get("/staff/customers/{customer_id}", response_class=HTMLResponse)
+    def staff_customer(request: Request, customer_id: int):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        customer = db.get_customer(customer_id)
+        if customer is None:
+            raise HTTPException(status_code=404, detail="Unknown customer")
+        jobs = [lead_out(row, business) for row in db.list_jobs_for_customer(customer_id)]
+        return templates.TemplateResponse(
+            request,
+            "customer.html",
+            {
+                "title": customer.get("name") or f"Customer {customer_id}",
+                "active": "customers",
+                "business": business,
+                "customer": customer,
+                "addresses": _json_list(customer.get("addresses_json")),
+                "numbers": db.list_numbers(customer_id),
+                "jobs": jobs,
                 "auth_enabled": auth_enabled(settings),
             },
         )
@@ -287,6 +396,22 @@ def create_app(
         if lead is None:
             raise HTTPException(status_code=404, detail="Unknown job")
         view = lead_out(lead, business)
+        candidate = None
+        candidate_addresses: list[str] = []
+        if lead.get("possible_customer_id"):
+            candidate = db.get_customer(lead["possible_customer_id"])
+            if candidate:
+                candidate_addresses = _json_list(candidate.get("addresses_json"))
+        other_jobs = [
+            item
+            for item in (
+                lead_out(row, business) for row in db.list_jobs_for_customer(lead["customer_id"])
+            )
+            if item["id"] != lead_id
+        ]
+        link_targets = [
+            row for row in db.list_customers() if row["id"] != lead["customer_id"]
+        ]
         return templates.TemplateResponse(
             request,
             "lead.html",
@@ -295,11 +420,16 @@ def create_app(
                 "active": "staff",
                 "business": business,
                 "lead": view,
-                "messages": db.list_messages(lead["conversation_id"]),
+                "messages": db.list_messages(lead["conversation_id"], job_id=lead_id),
                 "extracted": _pretty_json(lead.get("extracted_json")),
                 "handoff_label": HANDOFF_LABELS.get(lead.get("handoff_reason") or "", ""),
                 "send_error": send,
                 "auth_enabled": auth_enabled(settings),
+                "candidate": candidate,
+                "candidate_addresses": candidate_addresses,
+                "other_jobs": other_jobs,
+                "link_targets": link_targets,
+                "job_statuses": JOB_STATUSES,
             },
         )
 
@@ -338,6 +468,60 @@ def create_app(
             target = f"{target}?send={result.get('reason') or 'skipped'}"
         return RedirectResponse(target, status_code=303)
 
+    @app.post("/staff/{lead_id}/link")
+    def staff_link_number(request: Request, lead_id: int, customer_id: int = Form(...)):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        try:
+            linked = db.link_number(lead_id, customer_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown job or customer")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return RedirectResponse(f"/staff/customers/{linked['customer_id']}", status_code=303)
+
+    @app.post("/staff/{lead_id}/split")
+    def staff_split_job(request: Request, lead_id: int, message_id: int = Form(...)):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        try:
+            created = db.split_job(lead_id, [message_id])
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown job")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return RedirectResponse(f"/staff/{created['id']}", status_code=303)
+
+    @app.post("/staff/{lead_id}/status")
+    def staff_set_status(request: Request, lead_id: int, status: str = Form(...)):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        try:
+            db.set_job_status(lead_id, status)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown job")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return RedirectResponse(f"/staff/{lead_id}", status_code=303)
+
+    @app.post("/staff/messages/{message_id}/reassign")
+    def staff_reassign_message(
+        request: Request, message_id: int, job_id: int = Form(...)
+    ):
+        blocked = staff_guard(request)
+        if blocked is not None:
+            return blocked
+        try:
+            job = db.reassign_message(message_id, job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown message or job")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return RedirectResponse(f"/staff/{job['id']}", status_code=303)
+
     @app.post("/api/conversations")
     def start_conversation(body: StartIn):
         try:
@@ -375,6 +559,7 @@ def create_app(
             media=media_downloader,
             transcriber=transcriber,
             now=moment(),
+            intent=intent,
         )
 
     @app.get("/api/conversations/{conversation_id}")
@@ -428,6 +613,7 @@ def create_app(
                 media=media_downloader,
                 transcriber=transcriber,
                 now=moment(),
+                intent=intent,
             )
             if result.get("duplicate"):
                 duplicates += 1
@@ -464,6 +650,16 @@ def _saved_media_path(lead: dict, media_id: str, root: Path) -> Path | None:
             if path.is_file():
                 return path
     return None
+
+
+def _json_list(raw) -> list:
+    try:
+        value = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
 
 
 def _pretty_json(raw: str | None) -> str:

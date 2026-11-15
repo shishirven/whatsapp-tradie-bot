@@ -31,6 +31,42 @@ flowchart TD
   Quote --> Desk
 ```
 
+## Routing
+
+Every inbound message goes through one decision, before intake:
+
+```mermaid
+flowchart TD
+  inbound[Inbound message]
+  inbound --> known{Number on file?}
+  known -->|No| fresh[New customer and job]
+  fresh --> tagged{Referral or source tag?}
+  tagged -->|Ad| adOpen[Open with the ad headline and campaign]
+  tagged -->|web or qr| tagOpen[Source website or qr]
+  tagged -->|Neither| organic[Source organic]
+  adOpen --> intake[Ask only what is missing]
+  tagOpen --> intake
+  organic --> intake
+  intake --> match{Name and address match one client?}
+  match -->|Yes| flag[Flag possible existing client and reveal nothing]
+  match -->|Unclear| ask[Ask once, then ask for an address]
+  known -->|Yes| openJob{Open job?}
+  openJob -->|Yes| intent{Clearly a new job?}
+  intent -->|No| follow[Follow up on that job and do not restart intake]
+  intent -->|Yes| another[Start a separate job]
+  openJob -->|No| greet[Greet by name, confirm the saved address, new job]
+```
+
+A number is known when it is already in `customer_numbers` — including clients imported from CSV. An open job is `open`, `quoted`, or `booked`. `completed` and `cancelled` are closed, so the next message starts a new job.
+
+Follow-up on an open job answers a status question from that job's booking, attaches a photo or voice note, or hands the chat to the tradie. It does not run the intake questions again after handoff. "Clearly a new job" is classified by Gemini when `LLM_PROVIDER=gemini`, and by Claude when `LLM_PROVIDER=anthropic`. With no key, a phrase list is the stand-in (`different job`, `another job`, and similar). Tests pass a fake classifier and never call Gemini or Anthropic.
+
+Job source is one of `ad`, `organic`, `website`, `qr`, or `repeat`. A Meta referral is `ad`, and the first reply names the headline and campaign. A configured prefilled tag in `config/business.json` (`(web)`, `(qr)`, and whatever you add under `source_tags`) sets `website` or `qr` and is removed before the qualifier reads the text. A known number with neither is `repeat`. Anything else is `organic`.
+
+A brand-new number is not told that it matches anyone. If the name and address they give match exactly one saved customer, the job is flagged **possible existing client** for the desk. The bot does not say it knows them, and it does not mention that customer's other jobs, quotes, addresses, or bookings. If the name matches but the address does not, the bot may ask once: "Have we done work for you before?" A yes is followed by "What address did we do that work at?" Staff confirm the match by linking the number. Until then the number stays its own customer.
+
+## Scoring
+
 Scoring is not left to the model. `app/scoring.py` decides hot, warm, and cold from the business config.
 
 | Score | Rule |
@@ -39,15 +75,17 @@ Scoring is not left to the model. `app/scoring.py` decides hot, warm, and cold f
 | Warm | A job type is known, but the suburb is outside the service area, or urgency, description, or a name is still missing |
 | Hot | An emergency inside the service area, or a configured job type with an in-area suburb, urgency, description, and a name |
 
-Handoff happens when the score is hot, or when the customer asks for a person, at any score. After that the bot stops extracting. A slot the customer already picked can still be booked. One conversation is kept per phone number.
+Handoff happens when the score is hot, or when the customer asks for a person, at any score. After that the bot stops extracting on that job. A slot the customer already picked can still be booked. A later message that is clearly a new job starts intake again. One chat thread is kept per phone number. A customer can have several numbers and several jobs.
 
 Quotes are a min–max range from `config/business.json`. They are saved as drafts. The bot never puts a dollar amount in a customer reply. Someone on `/staff` approves the draft, and only then is it sent.
 
 Visit times come from `Calendar`. With Google credentials that is the Calendar API (service account or OAuth). Without them, bookings live in SQLite so the simulator still works. The customer is offered the next three free slots inside the configured hours, and the slot they pick is booked.
 
-Claude Sonnet 5.5 does not accept a forced tool choice (`tool_choice` of `any` or `tool` returns 400). The call uses `tool_choice: auto`, a strict schema, and a prompt that tells the assistant to call `record_job_intake` every turn. `thinking` is `between_tools`. If the model replies in plain text anyway, that text is sent and no new facts are written. Any sentence that still contains a price is removed before send.
+Gemini is the recommended reader. It calls `record_job_intake` on every turn (`function_calling_config` mode ANY) and returns the WhatsApp reply plus the job facts. The same scrubber removes any sentence that still contains a price before send. A free-tier 429, or any other Gemini error, uses the offline qualifier for that turn so the webhook still answers.
 
-With no API key, `LLM_PROVIDER` defaults to `mock`: a keyword extractor in `app/extract.py`. It is there so you can click through the product. It is not the reader you ship.
+Claude stays available. Sonnet 5.5 does not accept a forced tool choice (`tool_choice` of `any` or `tool` returns 400). That call uses `tool_choice: auto`, a strict schema, and a prompt that tells the assistant to call `record_job_intake` every turn. `thinking` is `between_tools`. If the model replies in plain text anyway, that text is sent and no new facts are stored.
+
+With no API key, `LLM_PROVIDER` defaults to `mock`: a keyword extractor in `app/extract.py`. It is there so you can click through the product. It is not the reader you ship. If `LLM_PROVIDER` is unset and `GEMINI_API_KEY` is set, Gemini is selected. An Anthropic key alone still selects Claude.
 
 ## Run it locally
 
@@ -63,16 +101,25 @@ On Windows, activate with `.venv\Scripts\activate`.
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Pick a sample ad, chat, and watch the job card. The desk is [http://127.0.0.1:8000/staff](http://127.0.0.1:8000/staff). Interactive API docs are at `/docs`.
 
-To answer with Claude:
+To answer with Gemini, create a free key at [Google AI Studio](https://aistudio.google.com/apikey) and set:
+
+```bash
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+```
+
+The default model is `gemini-2.5-flash` (`GEMINI_MODEL`). Google has said that from 1 December 2026 requests to that id route to `gemini-3.5-flash-lite`. Set `GEMINI_MODEL` if you want a different id. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
+
+To answer with Claude instead:
 
 ```bash
 LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The default model is `claude-sonnet-5-5` (`ANTHROPIC_MODEL`).
+The Claude model is `claude-sonnet-5-5` (`ANTHROPIC_MODEL`).
 
-Tests do not call Anthropic, OpenAI, Meta, or Google. They pass fakes:
+Tests do not call Anthropic, Gemini, OpenAI, Meta, or Google. They pass fakes:
 
 ```bash
 pytest
@@ -99,7 +146,7 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 4. Deploy. The service URL is `https://<service>.onrender.com`.
 5. In Meta, set the callback URL to `https://<service>.onrender.com/webhook`.
 
-`MESSAGING_PROVIDER` is `whatsapp` and `LLM_PROVIDER` is `anthropic` in the blueprint. Until `WHATSAPP_TOKEN` and `PHONE_NUMBER_ID` are set, outbound sends are skipped and logged; inbound messages are still stored.
+`MESSAGING_PROVIDER` is `whatsapp` and `LLM_PROVIDER` is `gemini` in the blueprint. Until `WHATSAPP_TOKEN` and `PHONE_NUMBER_ID` are set, outbound sends are skipped and logged; inbound messages are still stored. Until `GEMINI_API_KEY` is set, the reply says that key is empty.
 
 ## Environment variables
 
@@ -109,6 +156,8 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `PHONE_NUMBER_ID` | WhatsApp phone number id. `WHATSAPP_PHONE_NUMBER_ID` is also accepted |
 | `VERIFY_TOKEN` | String you type into the Meta webhook form. `WHATSAPP_VERIFY_TOKEN` is also accepted |
 | `APP_SECRET` | Meta app secret. When set, `POST /webhook` must carry a valid `X-Hub-Signature-256`. `WHATSAPP_APP_SECRET` is also accepted |
+| `GEMINI_API_KEY` | Gemini. Required when `LLM_PROVIDER=gemini`. Free key from [AI Studio](https://aistudio.google.com/apikey) |
+| `GEMINI_MODEL` | Defaults to `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | Claude. Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | Defaults to `claude-sonnet-5-5` |
 | `OPENAI_API_KEY` | Whisper. Voice notes are stored without a transcript until this is set |
@@ -125,7 +174,7 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `BUSINESS_CONFIG` | Optional path to a different `business.json` |
 | `SQLITE_PATH` | Defaults to `data/tradie.db`. On Render, `/data/tradie.db` |
 | `MESSAGING_PROVIDER` | `simulated` or `whatsapp` |
-| `LLM_PROVIDER` | `mock` or `anthropic` |
+| `LLM_PROVIDER` | `gemini` (recommended), `anthropic`, or `mock` |
 
 Use either the service account or the OAuth trio. If both are set, the service account wins. If neither is set, slots are booked into SQLite only.
 
@@ -153,9 +202,20 @@ OAuth is the other path: a client id, secret, and refresh token that already has
 
 ## Staff desk
 
-`/staff` lists job cards: type, suburb, urgency, description, photos, voice-note transcript and summary, the offered or booked visit, and the draft quote. **Approve and send quote** is the only way a price leaves the building.
+`/staff` lists job cards: type, suburb, urgency, description, photos, voice-note transcript and summary, the offered or booked visit, the job status and source, and the draft quote. **Approve and send quote** is the only way a price leaves the building.
 
-Set `STAFF_USERNAME` and `STAFF_PASSWORD` before the Render URL is shared. With both set, every `/staff` page and the approve action require a session cookie. With either empty, the desk is open and a warning is logged — that is the local simulator only.
+`/staff/customers` lists each customer with their numbers, addresses, notes, and jobs. A job flagged as a possible existing client can be linked to that customer, which moves the new number and its jobs onto the saved record. On a job you can split a message onto a new job, move a message to another job of the same customer, or set the status to completed or cancelled.
+
+Import existing clients from the desk (CSV upload) or from the shell:
+
+```bash
+python -m app.import_clients clients.csv --dry-run
+python -m app.import_clients clients.csv
+```
+
+The file needs `name` and `phone` columns. `address` and `notes` are optional. Several numbers can sit in the phone cell, separated by `;` or `/`. `0412 345 678` is stored as `61412345678` — WhatsApp's country code plus number, with no plus sign. `--db` overrides `SQLITE_PATH`.
+
+Set `STAFF_USERNAME` and `STAFF_PASSWORD` before the Render URL is shared. With both set, every `/staff` page, the customer pages, the import, and the link, split, reassign, and approve actions require a session cookie. With either empty, the desk is open and a warning is logged — that is the local simulator only.
 
 ## 24-hour window
 
@@ -201,23 +261,31 @@ Then open `/staff`. With `APP_SECRET` set, compute `X-Hub-Signature-256` or the 
 | --- | --- |
 | `render.yaml` | Render Docker web service, Starter plan, health check, disk |
 | `config/business.json` | Trade, suburbs, hours, job types, draft price bands, sample ads |
-| `app/main.py` | Simulator, staff desk and login, quote approval, webhook |
-| `app/service.py` | One inbound turn: store, media, book, qualify, score, deliver |
+| `app/main.py` | Simulator, staff desk and login, customer view, quote approval, webhook |
+| `app/service.py` | One inbound turn: route, store, media, book, qualify, score, deliver |
+| `app/routing.py` | Job source, new-job classification, soft match |
+| `app/customers_io.py` | CSV import shared by the desk and the CLI |
+| `app/import_clients.py` | `python -m app.import_clients` |
+| `app/phones.py` | Australian numbers to WhatsApp digits |
 | `app/scoring.py` | Hot / warm / cold and the handoff decision |
 | `app/quotes.py` | Draft ranges and the price scrubber |
 | `app/booking.py` | Slot finder and the calendar interface |
 | `app/window.py` | 24-hour window and template-name stubs |
 | `app/media.py` | Graph download and the Whisper transcriber |
-| `app/llm.py` | Claude tool call, and the offline qualifier |
+| `app/llm.py` | Gemini and Claude tool calls, and the offline qualifier |
 | `app/messaging.py` | Gateway, signature check, webhook parser |
 
 ## What you still do yourself
 
 - Meta business verification, the phone number, the permanent token, and the webhook subscription to **messages**
 - Approved template names for `booking_confirmation` and `quote_followup`
-- Anthropic and OpenAI keys
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey), with `LLM_PROVIDER=gemini`. Claude is optional
+- An OpenAI key if you want voice notes transcribed
 - A Google calendar shared with the service account, or an OAuth refresh token
 - Staff username and password
-- Your own business name, suburbs, job types, hours, and price bands in `config/business.json`
+- Your own business name, suburbs, job types, hours, price bands, and source tags in `config/business.json`
+- A backup of the SQLite file before the first deploy of this change. On startup, each existing conversation becomes a customer, one WhatsApp number, and one job. Job ids stay the same as the old lead ids. Finished historical jobs are still `open` until you mark them completed or cancelled — until you do, the next message from that number stays on the old job
+- A CSV of existing clients, if you want a known number to be greeted by name instead of treated as new
+- A look at any job flagged **possible existing client**, and a link when the number really is that customer
 
 There is no Twilio and no n8n in this app.
