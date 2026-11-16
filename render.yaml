@@ -2,7 +2,7 @@
 # misses Meta webhook retries.
 services:
   - type: web
-    name: tradie-whatsapp
+    name: whatsapp-tradie-bot
     runtime: docker
     plan: starter
     healthCheckPath: /api/health

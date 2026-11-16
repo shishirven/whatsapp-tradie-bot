@@ -17,22 +17,22 @@ def test_signature_round_trip_and_dev_bypass():
 
 def test_parse_webhook_reads_text_profile_and_referral():
     payload = _payload(
-        "Is the Bali week still open?",
+        "The safety switch keeps tripping",
         referral={
             "source_url": "https://www.instagram.com/p/example",
-            "source_id": "ad_kenya_safari_02",
+            "source_id": "ad_fault_01",
             "source_type": "ad",
-            "headline": "Kenya safari week from $2,450",
+            "headline": "Emergency electrician — Inner West",
         },
     )
     messages = parse_webhook(payload)
     assert len(messages) == 1
     inbound = messages[0]
     assert inbound.wa_id == "15551230000"
-    assert inbound.text == "Is the Bali week still open?"
+    assert inbound.text == "The safety switch keeps tripping"
     assert inbound.profile_name == "Jamie"
-    assert inbound.ad_id == "ad_kenya_safari_02"
-    assert inbound.ad_headline == "Kenya safari week from $2,450"
+    assert inbound.ad_id == "ad_fault_01"
+    assert inbound.ad_headline == "Emergency electrician — Inner West"
     assert inbound.ad_source == "instagram"
     assert inbound.provider_message_id == "wamid.1"
 
@@ -58,7 +58,7 @@ def test_parse_ignores_status_callbacks_and_other_products():
 def test_facebook_short_link_counts_as_facebook():
     payload = _payload(
         "Hi",
-        referral={"source_url": "https://fb.me/abc", "source_id": "999", "headline": "A trip"},
+        referral={"source_url": "https://fb.me/abc", "source_id": "999", "headline": "Switchboard upgrade"},
     )
     assert parse_webhook(payload)[0].ad_source == "facebook"
 

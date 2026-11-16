@@ -88,7 +88,7 @@ def test_wants_human_matches_phrases_not_loose_words():
     assert wants_human("Can I talk to a person?")
     assert wants_human("please call me tomorrow")
     assert wants_human("Can I speak to the electrician?")
-    assert not wants_human("I'm travelling with someone in my family")
+    assert not wants_human("I'm heading over with someone in my family")
     assert not wants_human("")
     assert not wants_human(None)
 

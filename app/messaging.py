@@ -189,7 +189,7 @@ def verify_meta_signature(body: bytes, header: str | None, secret: str | None) -
 
 
 def parse_webhook(payload: dict) -> list[Inbound]:
-    """Pull traveller messages out of a WhatsApp Cloud API webhook body.
+    """Pull customer messages out of a WhatsApp Cloud API webhook body.
 
     Status callbacks (`delivered`, `read`) and other products return an empty
     list. Referral fields are the click-to-WhatsApp ad context.

@@ -1,4 +1,9 @@
+# Image and container name: whatsapp-tradie-bot
+# https://github.com/shishirven/whatsapp-tradie-bot
 FROM python:3.12-slim
+
+LABEL org.opencontainers.image.title="whatsapp-tradie-bot" \
+      org.opencontainers.image.source="https://github.com/shishirven/whatsapp-tradie-bot"
 
 WORKDIR /app
 
