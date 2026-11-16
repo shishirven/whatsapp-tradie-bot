@@ -1,4 +1,6 @@
-# Northside Electrical — WhatsApp assistant for tradies
+# WhatsApp Tradie Bot
+
+Repository: https://github.com/shishirven/whatsapp-tradie-bot
 
 A WhatsApp assistant for an Australian trade business. Electricians first: a customer messages the business number, the bot collects the job (type, suburb, urgency, description, photos, a preferred time, and a name), offers three free visit slots, and hands the thread to the desk when the job is urgent or a good fit. Draft price ranges stay on the staff desk until a person sends them.
 
@@ -128,8 +130,8 @@ pytest
 ### Docker
 
 ```bash
-docker build -t tradie-whatsapp .
-docker run --rm -p 8000:8000 --env-file .env -v tradie-data:/data tradie-whatsapp
+docker build -t whatsapp-tradie-bot .
+docker run --rm --name whatsapp-tradie-bot -p 8000:8000 --env-file .env -v whatsapp-tradie-data:/data whatsapp-tradie-bot
 ```
 
 The image stores SQLite at `/data/tradie.db`. Leave `SQLITE_PATH` commented out in `.env` so that path is not overridden. The process listens on `PORT` (8000 if unset).

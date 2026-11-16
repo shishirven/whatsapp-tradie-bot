@@ -28,6 +28,7 @@ def test_health_and_home_page(client):
     assert page.status_code == 200
     assert "Electrician" in page.text
     assert "ad_fault_01" in page.text
+    assert "WhatsApp Tradie Bot" in page.text
     assert "Northside Electrical" in page.text
     assert "Sample business" in page.text
     assert client.get("/static/app.css").status_code == 200
@@ -373,11 +374,11 @@ def test_qualifier_failure_apologises_without_dropping_the_message(tmp_path):
 
     client = TestClient(create_app(settings=make_settings(tmp_path), qualifier=Boom()))
     conversation_id = client.post("/api/conversations", json={}).json()["conversation_id"]
-    result = client.post("/api/chat", json={"conversation_id": conversation_id, "text": "Bali"})
+    result = client.post("/api/chat", json={"conversation_id": conversation_id, "text": "ping"})
     assert result.status_code == 200
     assert "once more" in result.json()["reply"]
     assert result.json()["lead"]["score"] == "cold"
-    assert any(message["body"] == "Bali" for message in result.json()["messages"])
+    assert any(message["body"] == "ping" for message in result.json()["messages"])
 
 
 def test_missing_api_key_is_explained(tmp_path):

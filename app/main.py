@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
+from app import APP_NAME
 from app.auth import COOKIE, auth_enabled, credentials_match, issue_session, read_session
 from app.booking import build_calendar
 from app.business import load_business
@@ -49,6 +50,7 @@ from app.service import (
 logger = logging.getLogger("tradie")
 _ROOT = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_ROOT / "templates"))
+templates.env.globals["app_name"] = APP_NAME
 
 
 class StartIn(BaseModel):
@@ -177,7 +179,7 @@ def create_app(
         gemini_model=settings.gemini_model,
     )
 
-    app = FastAPI(title=f"{business.name} jobs", docs_url="/docs")
+    app = FastAPI(title=APP_NAME, docs_url="/docs")
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
     app.state.settings = settings
     app.state.db = db
