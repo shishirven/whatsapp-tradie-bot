@@ -305,8 +305,9 @@ def format_slot(start: datetime, end: datetime) -> str:
 
 def format_offer(slots: list[Slot], preferred: str | None = None) -> str:
     lines = []
-    if preferred:
-        lines.append(f"You mentioned {preferred}.")
+    mentioned = _real_preference(preferred)
+    if mentioned:
+        lines.append(f"You mentioned {mentioned}.")
     if not slots:
         lines.append("I couldn't see a free visit in the next stretch of business hours. A person will propose a time.")
         return " ".join(lines)
@@ -394,6 +395,16 @@ def _overlaps(start: datetime, end: datetime, busy: list[tuple[datetime, datetim
         if start < finish and end > begin:
             return True
     return False
+
+
+def _real_preference(preferred: str | None) -> str | None:
+    """Drop the JSON null the model sometimes stores, so we never say 'You mentioned null'."""
+    if preferred is None:
+        return None
+    text = str(preferred).strip()
+    if not text or text.casefold() in {"null", "none", "undefined", "nil", "n/a"}:
+        return None
+    return text
 
 
 def _format_time(value: datetime) -> str:

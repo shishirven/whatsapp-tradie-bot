@@ -46,7 +46,7 @@ from app.media import (
 )
 from app.messaging import DeliveryError, Inbound, MessagingGateway
 from app.notify import StaffNotifier
-from app.policy import apply_policy, asks_for_visit, guardrail_block
+from app.policy import apply_policy, asks_for_visit, guardrail_block, is_repeat_fault, is_safety_message
 from app.quotes import customer_quote_text, draft_quote, scrub_prices
 from app.routing import (
     KeywordIntentClassifier,
@@ -286,6 +286,9 @@ def handle_incoming(
         if inbound.profile_name and not conversation.get("profile_name"):
             conversation = db.set_profile_name(conversation["id"], inbound.profile_name)
         lead = db.get_open_job(conversation["id"])
+        if lead is None and _reopen_closed_job(db, conversation, inbound.text or ""):
+            lead = db.get_open_job(conversation["id"])
+            route = "follow_up"
         if lead is None:
             customer = db.get_customer(conversation["customer_id"])
             prefill, saved_address = _prefill_known(customer, business)
@@ -477,11 +480,27 @@ def handle_incoming(
         # Configured amounts are allowed through. The scrubber above already
         # removed any figure the model invented on its own.
         reply = _with_opening(opening, decision.replacement)
-    if decision.ensure_000 and "000" not in reply:
+    if decision.ensure_000 and "000" not in reply and is_safety_message(text or ""):
         reply = f"Call 000 now. {reply}".strip()
     reply = _name_earliest_slot(
         reply, text or "", business, calendar, moment, offer_visit=decision.offer_visit
     )
+    if _wants_cancel(text or "") and booking.get("status") == "booked":
+        reply = _cancel_reply(text or "", business, calendar, moment)
+        booking = {
+            "status": "cancelled",
+            "label": booking.get("label"),
+            "slots": [],
+            "event_id": None,
+            "start": None,
+            "end": None,
+        }
+    if decision.stop_intake:
+        handoff = True
+        handoff_reason = "abusive"
+    if not is_safety_message(text or ""):
+        reply = _strip_false_emergency(reply)
+    reply = _tidy_reply(reply)
 
     saved = _save(
         db, business, conversation, lead, photos, voice_notes, booking, quote,
@@ -892,6 +911,58 @@ def _with_offer(reply: str, slots: list[Slot], preferred: str | None) -> str:
     if kept:
         return f"{kept}\n\n{offer}"
     return offer
+
+
+def _reopen_closed_job(db: Database, conversation: dict, text: str) -> bool:
+    """Put a finished job back on the desk when this message is the same fault again."""
+    if not is_repeat_fault(text):
+        return False
+    active_id = conversation.get("active_job_id")
+    if not active_id:
+        return False
+    closed = db.get_job(active_id)
+    if not closed or closed.get("job_status") not in {"completed", "cancelled"}:
+        return False
+    db.set_job_status(closed["id"], "open")
+    return True
+
+
+def _wants_cancel(text: str) -> bool:
+    return re.search(r"\bcancel\b", text or "", re.IGNORECASE) is not None
+
+
+def _cancel_reply(text: str, business: Business, calendar: Calendar | None, moment: datetime) -> str:
+    when = "Thursday" if "thursday" in (text or "").casefold() else "that visit"
+    slots = available_slots(business, calendar, moment) if calendar is not None else []
+    if len(slots) >= 2:
+        return (
+            f"No problem, I've cancelled {when}. Would you like to rebook? "
+            f"I have {slots[0].label} or {slots[1].label}."
+        )
+    if slots:
+        return f"No problem, I've cancelled {when}. The earliest slot I have is {slots[0].label}."
+    return f"No problem, I've cancelled {when}."
+
+
+def _strip_false_emergency(reply: str) -> str:
+    """Drop a leading 'Call 000 now' that was added to a message that is not a hazard."""
+    return re.sub(r"(?i)^call 000 now\.?\s*", "", reply or "").strip()
+
+
+def _tidy_reply(reply: str) -> str:
+    """Drop a null preference and a greeting sentence that was added twice."""
+    text = re.sub(r"(?i)\byou mentioned (?:null|none|undefined)\b\.?\s*", "", reply or "")
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    seen: set[str] = set()
+    kept: list[str] = []
+    for part in parts:
+        cleaned = part.strip()
+        key = re.sub(r"\s+", " ", cleaned).casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(cleaned)
+    return " ".join(kept)
 
 
 def _name_earliest_slot(

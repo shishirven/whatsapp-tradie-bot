@@ -79,6 +79,53 @@ def test_prompt_injection_does_not_confirm_a_free_job(tmp_path):
     assert "free" not in reply.lower()
 
 
+def test_sparky_is_not_treated_as_sparks(tmp_path):
+    data = json.loads(BUSINESS_PATH.read_text(encoding="utf-8"))
+    reply = _ask(
+        tmp_path,
+        parse_business(data),
+        "Another sparky quoted $200 less. Can you match it?",
+        "61412990118",
+    )
+    assert "000" not in reply
+    assert "call 000" not in reply.lower()
+    assert "can't change" in reply.lower()
+
+
+def test_null_preference_is_not_spoken():
+    from app.booking import format_offer
+
+    text = format_offer([], "null")
+    assert "null" not in text.lower()
+    assert "You mentioned" not in text
+
+
+def test_abuse_stops_the_next_intake_question(tmp_path):
+    data = json.loads(BUSINESS_PATH.read_text(encoding="utf-8"))
+    business = parse_business(data)
+    db_path = tmp_path / "policy.db"
+    first = _incoming(tmp_path, business, "You useless idiots can get stuffed. Fix this now.", "61412990119")
+    assert "Alex Example" in first["reply"]
+    assert "what needs doing" not in first["reply"].lower()
+    assert first["lead"]["handoff"] is True
+    second = handle_incoming(
+        Database(str(db_path)),
+        RuleBasedQualifier(business),
+        SimulatedGateway(),
+        LogNotifier(),
+        Inbound(
+            wa_id="61412990119",
+            text="the oven is dead",
+            message_type="text",
+            provider_message_id="policy-second",
+            source="simulator",
+        ),
+        business=business,
+        now=EVAL_NOW,
+    )
+    assert "what needs doing" not in second["reply"].lower()
+
+
 def test_danger_sets_the_escalation_flag_and_says_000(tmp_path):
     data = json.loads(BUSINESS_PATH.read_text(encoding="utf-8"))
     result = _incoming(

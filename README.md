@@ -110,7 +110,7 @@ LLM_PROVIDER=gemini
 GEMINI_API_KEY=...
 ```
 
-The default model is `gemini-3.8-flash` (`GEMINI_MODEL`). `gemini-2.5-flash` returns 404 for new API keys. Each Gemini request waits at most 20 seconds and is not retried. A timeout, a 404, a free-tier 429, or any other Gemini error uses the offline qualifier for that turn. A 404 is logged with the model id and the name `GEMINI_MODEL`. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
+The default model is `gemini-3.8-flash` (`GEMINI_MODEL`). On Render, set `GEMINI_MODEL=gemini-3.5-flash-lite` and `GEMINI_FALLBACK_MODELS=gemini-3.1-flash-lite`. `gemini-3.8-flash` was returning 503 and 504, and `gemini-3.8-pro` is 404 on a free key. A 404, 429, 503, or 504 tries the next model in that list. The keyword qualifier is used only after every model in the list has failed. The log line `gemini qualify answered with model ...` names the model that answered. Each request still waits at most 20 seconds and is not retried on the same model. A 404 is logged with the model id and the name `GEMINI_MODEL`. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
 
 To answer with Claude instead:
 
@@ -137,14 +137,14 @@ Offline, deterministic checks only (no API key, mock qualifier):
 python -m evals.run --offline
 ```
 
-With `GEMINI_API_KEY` set, the same command sends each case through the real Gemini qualifier and then grades the reply with a separate judge. `GEMINI_MODEL` is the reply model (`gemini-3.8-flash` by default). `JUDGE_MODEL` is the judge and defaults to `gemini-3.8-pro`, which is the stronger model. Hard-rule checks (000, the price book, DIY steps, refunds and fault, fabricated config, stored client details, the escalation flag) are code. They do not call the judge.
+With `GEMINI_API_KEY` set, the same command sends each case through the real Gemini qualifier and then grades the reply with a separate judge. `GEMINI_MODEL` is the reply model. `JUDGE_MODEL` is the judge and defaults to `gemini-3.1-flash-lite`, which answers on the free tier. Hard-rule checks (000, the price book, DIY steps, refunds and fault, fabricated config, stored client details, the escalation flag) are code. They do not call the judge. A configured call-out fee or price-book range is not a fixed price.
 
 ```bash
 python -m evals.run
-python -m evals.run --repeats 3
+python -m evals.run --repeats 3 --rpm 5
 ```
 
-`--repeats N` runs every case N times. A case whose overall verdict, deterministic verdict, or judge verdict is not the same on every repeat is marked unstable.
+`--rpm 5` waits so Gemini is called at most five times a minute. Use that on the free tier. `--repeats N` runs every case N times. A case whose overall verdict, deterministic verdict, or judge verdict is not the same on every repeat is marked unstable.
 
 Reports are written to `evals/results/` as JSON and Markdown. That directory is gitignored.
 
@@ -193,7 +193,9 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `VERIFY_TOKEN` | String you type into the Meta webhook form. `WHATSAPP_VERIFY_TOKEN` is also accepted |
 | `APP_SECRET` | Meta app secret. When set, `POST /webhook` must carry a valid `X-Hub-Signature-256`. `WHATSAPP_APP_SECRET` is also accepted |
 | `GEMINI_API_KEY` | Gemini. Required when `LLM_PROVIDER=gemini`. Free key from [AI Studio](https://aistudio.google.com/apikey) |
-| `GEMINI_MODEL` | Defaults to `gemini-3.8-flash` |
+| `GEMINI_MODEL` | Reply model. Defaults to `gemini-3.8-flash`. On Render use `gemini-3.5-flash-lite` |
+| `GEMINI_FALLBACK_MODELS` | Comma-separated models tried after a 404, 429, 503, or 504. On Render: `gemini-3.1-flash-lite` |
+| `JUDGE_MODEL` | Eval judge only. Defaults to `gemini-3.1-flash-lite` |
 | `ANTHROPIC_API_KEY` | Claude. Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | Defaults to `claude-sonnet-5-5` |
 | `OPENAI_API_KEY` | Whisper. Voice notes are stored without a transcript until this is set |

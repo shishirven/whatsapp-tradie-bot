@@ -25,21 +25,6 @@ _SERVICE_AREA = re.compile(
     r"\bdo you (?:service|cover|work in|come to)\s+([A-Za-z][A-Za-z \-']+)",
     re.IGNORECASE,
 )
-_DANGER = (
-    "burning",
-    "smoke",
-    "flame",
-    "spark",
-    "shock",
-    "electrocut",
-    "powerline",
-    "power line",
-    "downed line",
-    "line is down",
-    "oxygen",
-    "life-support",
-    "life support",
-)
 _COMPLAINTS = (
     "meant to be here",
     "invoice is",
@@ -68,10 +53,32 @@ class PolicyDecision:
     offer_visit: bool = False
     escalated: bool = False
     escalation_reason: str | None = None
+    stop_intake: bool = False
 
 
 def asks_for_visit(text: str) -> bool:
     return bool(_VISIT.search(text or ""))
+
+
+def is_safety_message(text: str) -> bool:
+    """True for a real hazard. A whole-street outage and the word "sparky" are not."""
+    lowered = (text or "").casefold()
+    return bool(_life_support(lowered) or _powerline(lowered) or _shock(lowered) or _burning(lowered))
+
+
+def is_repeat_fault(text: str) -> bool:
+    """The same job has come back. A new power point 'again' is a different job."""
+    lowered = (text or "").casefold()
+    if any(
+        phrase in lowered
+        for phrase in ("flickering", "fixed last week", "same light", "came back", "still broken")
+    ):
+        return True
+    return re.search(
+        r"\b(tripping|flicker|broken|fault|not working)\b.{0,24}\bagain\b"
+        r"|\bagain\b.{0,24}\b(tripping|flicker|broken|fault)\b",
+        lowered,
+    ) is not None
 
 
 def apply_policy(text: str, business: Business) -> PolicyDecision:
@@ -79,7 +86,11 @@ def apply_policy(text: str, business: Business) -> PolicyDecision:
     lowered = (text or "").casefold()
     replacement = None
     offer_visit = False
-    if _is_injection(lowered):
+    stop_intake = False
+    safety = _safety_reply(text or "", business)
+    if safety:
+        replacement = safety
+    elif _is_injection(lowered):
         replacement = (
             "I can't do that, but I'm happy to help with a quote or booking. "
             "What do you need done?"
@@ -94,6 +105,20 @@ def apply_policy(text: str, business: Business) -> PolicyDecision:
             offer_visit = True
         else:
             replacement = _wire_reply(business)
+    elif _is_abuse(lowered):
+        replacement = _abuse_reply(business)
+        stop_intake = True
+    elif (complaint := _complaint_reply(text or "", business)):
+        replacement = complaint
+    elif _is_tenant(lowered):
+        replacement = (
+            "Happy to help. Repairs usually need approval from your landlord or property manager. "
+            "Has it been approved, and who should the invoice go to?"
+        )
+    elif _claims_prior_work(lowered):
+        replacement = _match_reply(text or "")
+    elif (photo := _photo_reply(text or "", business)):
+        replacement = photo
     elif _asks_exact_price(lowered):
         replacement = _exact_price_reply(business)
     elif _asks_discount(lowered):
@@ -113,12 +138,15 @@ def apply_policy(text: str, business: Business) -> PolicyDecision:
         elif _asks_identity(lowered):
             replacement = _identity_reply(business)
     reason = _escalation_reason(lowered)
+    if stop_intake and reason is None:
+        reason = "abusive"
     return PolicyDecision(
         replacement=replacement,
-        ensure_000=_is_danger(lowered),
+        ensure_000=bool(safety) and "000" in safety,
         offer_visit=offer_visit,
         escalated=reason is not None,
         escalation_reason=reason,
+        stop_intake=stop_intake,
     )
 
 
@@ -363,8 +391,164 @@ def _asks_identity(lowered: str) -> bool:
     )
 
 
+def _word(lowered: str, pattern: str) -> bool:
+    return re.search(pattern, lowered) is not None
+
+
+def _life_support(lowered: str) -> bool:
+    return any(phrase in lowered for phrase in ("oxygen", "life-support", "life support"))
+
+
+def _powerline(lowered: str) -> bool:
+    return any(phrase in lowered for phrase in ("powerline", "power line", "downed line", "line is down"))
+
+
+def _street_outage(lowered: str) -> bool:
+    street = any(phrase in lowered for phrase in ("whole street", "our street", "the street", "in the street"))
+    return street and any(phrase in lowered for phrase in ("power", "outage", "blackout"))
+
+
+def _shock(lowered: str) -> bool:
+    return _word(lowered, r"\bshocks?\b")
+
+
+def _burning(lowered: str) -> bool:
+    if any(phrase in lowered for phrase in ("burning", "smoke", "flame")):
+        return True
+    return _word(lowered, r"\bsparks?\b")
+
+
+def _safety_reply(text: str, business: Business) -> str | None:
+    lowered = text.casefold()
+    owner = business.owner_label()
+    if _life_support(lowered):
+        return (
+            "If she's at any risk, call 000 now. Also call your energy retailer and tell them "
+            f"it's a life-support household. I'm marking this urgent for {owner}. Address please?"
+        )
+    if _powerline(lowered):
+        return (
+            "Stay at least 8 metres away and call 000, then your electricity distributor's fault line. "
+            "We can't work on network lines, but we can help with any damage on your property once it's made safe."
+        )
+    if _street_outage(lowered):
+        return (
+            "That sounds like a network outage, which your distributor handles. "
+            "Their fault number is on your power bill. If only your home is out, tell me and I'll book someone."
+        )
+    if _shock(lowered):
+        return (
+            "Please don't touch any taps or appliances. If anyone feels unwell, call 000. "
+            f"This can be a serious fault, so I'm flagging it as urgent with {owner}. "
+            "What's your address and best number?"
+        )
+    if _burning(lowered):
+        return (
+            "That needs urgent attention. If you see smoke, flames or sparks, call 000 now. "
+            "If it's safe, turn off the main switch and keep clear of the board. "
+            f"I'm alerting {owner} right now. What's your address?"
+        )
+    return None
+
+
+def _complaint_reply(text: str, business: Business) -> str | None:
+    lowered = text.casefold()
+    owner = business.owner_label()
+    if business.callback_timeframe:
+        by_when = f"by {business.callback_timeframe}"
+    else:
+        by_when = f"once {owner} has confirmed a time"
+    if "meant to be here" in lowered:
+        return (
+            f"I'm sorry, that's frustrating. I'm contacting {owner} now and will send you "
+            "an updated arrival time within 15 minutes."
+        )
+    if "invoice" in lowered and ("quote" in lowered or "more than" in lowered):
+        return (
+            f"I'm sorry this doesn't match what you expected. I'm sending this to {owner} to review "
+            f"against your quote, and he'll call you {by_when}. Could you send the invoice number?"
+        )
+    if "flickering" in lowered or "fixed last week" in lowered:
+        return (
+            f"Sorry to hear that. I've reopened your job and marked it priority. "
+            f"{owner} will be in touch to arrange a return visit. Is it the same light as before?"
+        )
+    if "plaster" in lowered:
+        return (
+            f"I'm sorry, that's not the standard we aim for. Could you send a photo? "
+            f"I'm passing it to {owner}, who'll contact you today."
+        )
+    if "cracked" in lowered or "tiles" in lowered:
+        return (
+            f"I'm sorry this has happened. Please send photos and when you noticed it. "
+            f"{owner} will call you personally {by_when}."
+        )
+    if "refund" in lowered:
+        return (
+            f"I hear you. I can't approve refunds, but {owner} can. I've sent him your request "
+            f"and job details, and he'll call {by_when}. Anything you'd like me to add?"
+        )
+    if any(phrase in lowered for phrase in ("fair trading", "1-star", "one-star", "1 star")):
+        return (
+            f"I understand, and I want this resolved for you. I've escalated it as urgent to {owner}, "
+            f"who'll call you {by_when}."
+        )
+    return None
+
+
+def _abuse_reply(business: Business) -> str:
+    return (
+        f"I can see you're upset and I want to help. I'm passing this to {business.owner_label()} "
+        "to call you directly."
+    )
+
+
+def _claims_prior_work(lowered: str) -> bool:
+    return any(
+        phrase in lowered
+        for phrase in ("you did my", "you did our", "last year", "you've done", "you have done")
+    )
+
+
+def _match_reply(text: str) -> str:
+    match = re.search(r"\bit'?s\s+([A-Za-z]+)", text, re.IGNORECASE)
+    name = match.group(1).capitalize() if match else ""
+    hello = f"Thanks, {name}." if name else "Thanks."
+    return (
+        f"{hello} I'll have the team match this number to your record. "
+        "What do you need help with today?"
+    )
+
+
+def _is_tenant(lowered: str) -> bool:
+    return "tenant" in lowered or "landlord" in lowered
+
+
+def _photo_reply(text: str, business: Business) -> str | None:
+    lowered = text.casefold()
+    looks_like_board = any(phrase in lowered for phrase in ("fuse", "ceramic", "old board"))
+    if "[photo:" not in lowered and "photo of" not in lowered and not looks_like_board:
+        return None
+    if "upgrade" not in lowered and "photo" not in lowered:
+        return None
+    owner = business.owner_label()
+    band = business.price_range_text("switchboard")
+    if band:
+        price = f"Indicative range is {band}."
+    else:
+        price = f"I'll confirm the indicative range with {owner} and I won't guess a figure."
+    return (
+        "Thanks for the photo. That looks like an older board with ceramic fuses, which we upgrade regularly. "
+        f"{price} {owner} will confirm after checking the meter and mains. What suburb are you in?"
+    )
+
+
 def _is_danger(lowered: str) -> bool:
-    return any(phrase in lowered for phrase in _DANGER)
+    return bool(_life_support(lowered) or _powerline(lowered) or _shock(lowered) or _burning(lowered))
+
+
+def _is_abuse(lowered: str) -> bool:
+    return any(phrase in lowered for phrase in _ABUSE)
 
 
 def _escalation_reason(lowered: str) -> str | None:
