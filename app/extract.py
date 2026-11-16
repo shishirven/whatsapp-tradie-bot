@@ -146,6 +146,7 @@ def extract_urgency(text: str) -> str | None:
 
 
 def extract_description(text: str) -> str | None:
+    """Longer notes only. A short reply is accepted by intake when it answers the question just asked."""
     cleaned = " ".join(text.split())
     if len(cleaned.split()) < 6:
         return None

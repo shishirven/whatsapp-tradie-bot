@@ -20,6 +20,7 @@ import anthropic
 
 from app.business import Business, load_business
 from app.extract import extract_facts
+from app.intake import apply_intake, normalise_intake
 from app.scoring import canonical_facts, merge_facts, wants_human
 
 logger = logging.getLogger("tradie.llm")
@@ -50,7 +51,11 @@ QUALIFY_TOOL = {
             },
             "job_type": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                "description": "Configured job type id, or their words, or null. The ad is not confirmation.",
+                "description": (
+                    "Configured job type id, or their words when they describe the work "
+                    "without a listed name. A short answer still counts. Null only when "
+                    "they have not said. The ad is not confirmation."
+                ),
             },
             "suburb": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -62,7 +67,10 @@ QUALIFY_TOOL = {
             },
             "description": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                "description": "What they say is wrong, in their words, or null.",
+                "description": (
+                    "What they say is wrong, in their words, even a short phrase. "
+                    "'wiring is the issue' means wiring. Null only when they have not said."
+                ),
             },
             "preferred_time": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -90,14 +98,6 @@ _FALLBACK_REPLY = "Could you tell me a little more about the job?"
 _MAX_HISTORY = 20
 _SAFETY = "If anyone is in danger, or you can smell burning, get out and call 000."
 
-_QUESTIONS = (
-    ("job_type", "What needs doing — a fault, a power point, a switchboard, or something else?"),
-    ("suburb", "Which suburb is the job in?"),
-    ("urgency", "Is this an emergency, is it urgent, or can it wait?"),
-    ("description", "What's going on, in a sentence or two?"),
-    ("contact_name", "What name should I put on the job?"),
-)
-
 
 @dataclass
 class QualificationDraft:
@@ -112,6 +112,8 @@ class QualificationDraft:
     preferred_time: str | None = None
     contact_name: str | None = None
     raw: dict | None = None
+    intake: dict | None = None
+    intake_prompt: str | None = None
 
     def facts(self) -> dict:
         return {
@@ -133,6 +135,7 @@ class TurnContext:
     ad: dict | None
     profile_name: str | None
     system: str
+    intake: dict | None = None
 
 
 class AnthropicQualifier:
@@ -198,7 +201,7 @@ class GeminiQualifier:
 
 
 class RuleBasedQualifier:
-    """Offline practice qualifier. Keyword extraction plus a fixed question order."""
+    """Offline qualifier. Keywords, then a loose read of the question just asked."""
 
     def __init__(self, business: Business | None = None) -> None:
         self.business = business or load_business()
@@ -206,30 +209,59 @@ class RuleBasedQualifier:
     def qualify(self, turn: TurnContext) -> QualificationDraft:
         latest = _latest_user_text(turn.history)
         extracted = extract_facts(latest, self.business)
-        merged = canonical_facts(merge_facts(turn.known, extracted), self.business)
         asked = wants_human(latest)
+        if asked:
+            reply = (
+                f"Absolutely — I'll bring a person from the {self.business.name} desk into this chat."
+            )
+            raw = {"reply": reply, "request_human": True, **extracted}
+            return QualificationDraft(
+                reply=reply,
+                request_human=True,
+                job_type=extracted["job_type"],
+                suburb=extracted["suburb"],
+                urgency=extracted["urgency"],
+                description=extracted["description"],
+                preferred_time=extracted["preferred_time"],
+                contact_name=extracted["contact_name"],
+                raw=raw,
+                intake=normalise_intake(turn.intake),
+            )
+        outcome = apply_intake(
+            latest,
+            turn.known,
+            turn.history,
+            self.business,
+            intake=turn.intake,
+            model_facts=extracted,
+        )
+        combined = merge_facts(extracted, outcome.facts)
+        merged = canonical_facts(merge_facts(turn.known, combined), self.business)
         reply = _compose_reply(
             business=self.business,
             latest=latest,
-            extracted=extracted,
+            extracted=combined,
             known=turn.known,
             merged=merged,
             ad=turn.ad,
             profile_name=turn.profile_name,
             history=turn.history,
-            asked=asked,
+            asked=False,
+            question=outcome.question,
         )
-        raw = {"reply": reply, "request_human": asked, **extracted}
+        raw = {"reply": reply, "request_human": False, **combined}
         return QualificationDraft(
             reply=reply,
-            request_human=asked,
-            job_type=extracted["job_type"],
-            suburb=extracted["suburb"],
-            urgency=extracted["urgency"],
-            description=extracted["description"],
-            preferred_time=extracted["preferred_time"],
-            contact_name=extracted["contact_name"],
+            request_human=False,
+            job_type=combined.get("job_type"),
+            suburb=combined.get("suburb"),
+            urgency=combined.get("urgency"),
+            description=combined.get("description"),
+            preferred_time=combined.get("preferred_time"),
+            contact_name=combined.get("contact_name"),
             raw=raw,
+            intake=outcome.intake,
+            intake_prompt=outcome.prompt,
         )
 
 
@@ -251,7 +283,8 @@ class MissingKeyQualifier:
                 "Claude is selected (LLM_PROVIDER=anthropic) but ANTHROPIC_API_KEY is empty. "
                 "Add the key to your .env file, or unset LLM_PROVIDER to use the offline qualifier."
             )
-        return QualificationDraft(reply=reply, raw={"unconfigured": True})
+        # intake is set so the service does not replace this explanation with a question.
+        return QualificationDraft(reply=reply, raw={"unconfigured": True}, intake=normalise_intake(None))
 
 
 def parse_qualification(response) -> QualificationDraft:
@@ -357,6 +390,7 @@ def _compose_reply(
     profile_name: str | None,
     history: list[dict],
     asked: bool,
+    question: str | None,
 ) -> str:
     if asked:
         return (
@@ -373,7 +407,7 @@ def _compose_reply(
 
     new_job = extracted.get("job_type")
     if new_job and new_job != known.get("job_type"):
-        label = business.job_label(new_job) or new_job
+        label = business.job_label(new_job) or _label(new_job)
         parts.append(f"{label} — I'll put that on the job.")
     elif ad and not merged.get("job_type") and first_user_turn:
         headline = ad.get("headline") or "the ad you tapped"
@@ -385,16 +419,17 @@ def _compose_reply(
             "I'll note it so someone can refer you."
         )
 
-    question = _next_question(merged)
-    if question and not (merged.get("urgency") == "emergency" and business.in_area(merged.get("suburb")) and merged.get("job_type")):
-        # An in-area emergency is already enough to hand over. Don't pile on a question.
-        if not _checklist_complete(merged, business):
-            parts.append(question)
-            return " ".join(parts)
+    ready = _checklist_complete(merged, business)
+    emergency_handoff = bool(
+        merged.get("urgency") == "emergency"
+        and business.in_area(merged.get("suburb"))
+        and business.resolve_job_type(merged.get("job_type"))
+    )
+    if question and not emergency_handoff and not ready:
+        parts.append(question)
+        return " ".join(parts)
 
-    if _checklist_complete(merged, business) or (
-        merged.get("urgency") == "emergency" and business.in_area(merged.get("suburb")) and merged.get("job_type")
-    ):
+    if ready or emergency_handoff:
         label = business.job_label(merged.get("job_type")) or merged.get("job_type")
         who = merged.get("contact_name") or "you"
         parts.append(
@@ -403,9 +438,7 @@ def _compose_reply(
         )
         return " ".join(parts)
 
-    if question:
-        parts.append(question)
-    return " ".join(parts) or _FALLBACK_REPLY
+    return " ".join(parts) or "Thanks — I've noted that."
 
 
 def _checklist_complete(facts: dict, business: Business) -> bool:
@@ -418,11 +451,11 @@ def _checklist_complete(facts: dict, business: Business) -> bool:
     )
 
 
-def _next_question(facts: dict) -> str | None:
-    for key, question in _QUESTIONS:
-        if facts.get(key) in (None, ""):
-            return question
-    return None
+def _label(value: str) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+    return text[0].upper() + text[1:]
 
 
 def _latest_user_text(history: list[dict]) -> str:
