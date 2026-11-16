@@ -35,6 +35,7 @@ from app.booking import (
 )
 from app.business import Business, load_business
 from app.db import Database
+from app.intake import apply_intake, delivered_intake, render_reply
 from app.llm import TurnContext
 from app.media import (
     MediaDownloader,
@@ -132,6 +133,8 @@ You take job details for the desk. Be brief and specific, like a person typing i
 
 Rules:
 - Collect job type, suburb, urgency, a short description, preferred time, and the customer's name. Do not ask for a fact already on file.
+- A short or loosely worded answer still counts for the fact you just asked about. "wiring is the issue" means the problem is wiring. Store it and ask only for the next missing detail.
+- Never ask again for a fact that is already filled in. If you truly cannot tell what they mean, ask one different, more specific question, then move on with what you have. Do not repeat the same question.
 - Urgency is one of emergency, urgent, or planned.
 - If the suburb is outside the service area, say so and that a person can refer them. Still record the suburb.
 - If someone may be in danger, or they report burning, smoke, or a shock, tell them to call 000 first, then keep the job details.
@@ -417,6 +420,7 @@ def handle_incoming(
     established = _is_established(db, customer, lead["id"])
     saved_address = _saved_address(customer) if established else None
     conversation = db.get_conversation(conversation["id"]) or conversation
+    intake_before = _intake_of(lead)
     turn = TurnContext(
         history=history,
         known=known,
@@ -430,6 +434,7 @@ def handle_incoming(
             saved_address=saved_address,
             established=established,
         ),
+        intake=intake_before,
     )
     try:
         draft = qualifier.qualify(turn)
@@ -447,12 +452,20 @@ def handle_incoming(
             job_id=lead["id"],
         )
 
-    facts = canonical_facts(merge_facts(known, draft.facts()), business)
+    facts, reply, intake_after, intake_prompt = _apply_draft(
+        draft,
+        text=text,
+        known=known,
+        history=history,
+        business=business,
+        intake_before=intake_before,
+        skip=bool(booked_reply) or wants_human(text) or bool(draft.request_human),
+    )
     score = score_lead(facts, business)
     asked = bool(draft.request_human) or wants_human(text)
     handoff, handoff_reason = handoff_decision(score, asked)
     quote = draft_quote(business, facts.get("job_type"), quote or None)
-    reply = scrub_prices((draft.reply or "").strip()) or _APOLOGY
+    reply = scrub_prices(reply) or _APOLOGY
     if facts.get("urgency") == "emergency" and "000" not in reply:
         reply = f"{_SAFETY} {reply}"
     soft_question = _apply_soft_match(
@@ -483,11 +496,16 @@ def handle_incoming(
         reply, text or "", business, calendar, moment, offer_visit=decision.offer_visit
     )
 
+    if intake_prompt and intake_prompt not in reply:
+        intake_after = intake_before
+    intake_after = delivered_intake(intake_before, intake_after, reply)
+
     saved = _save(
         db, business, conversation, lead, photos, voice_notes, booking, quote,
         facts=facts, score_label=score.label, score_reason=score.reason,
         handoff=handoff, handoff_reason=handoff_reason, raw=draft.raw or draft.facts(),
         escalated=decision.escalated, escalation_reason=decision.escalation_reason,
+        intake=intake_after,
     )
     if handoff and conversation["status"] != "handed_off":
         db.set_status(conversation["id"], "handed_off")
@@ -916,11 +934,66 @@ def _name_earliest_slot(
     return f"{reply} The earliest slot I have is {slots[0].label}."
 
 
+def _apply_draft(draft, *, text, known, history, business, intake_before, skip: bool):
+    """Use the qualifier's reply when it already ran intake. Otherwise fill the gaps.
+
+    Gemini returns nulls for a short answer, or times out into the keyword
+    reader. The keyword reader records intake on the draft. A model that does
+    not is corrected here so a filled field is not asked again.
+    """
+    if draft.intake is not None:
+        facts = canonical_facts(merge_facts(known, draft.facts()), business)
+        return facts, (draft.reply or "").strip(), draft.intake, draft.intake_prompt
+    if skip:
+        facts = canonical_facts(merge_facts(known, draft.facts()), business)
+        return facts, (draft.reply or "").strip(), intake_before, None
+    outcome = apply_intake(
+        text,
+        known,
+        history,
+        business,
+        intake=intake_before,
+        model_facts=draft.facts(),
+    )
+    facts = canonical_facts(merge_facts(merge_facts(known, draft.facts()), outcome.facts), business)
+    reply = render_reply(draft.reply, outcome, business, facts)
+    return facts, reply, outcome.intake, outcome.prompt
+
+
+def _intake_of(lead: dict) -> dict:
+    raw = _load_json(lead.get("extracted_json"), {})
+    if not isinstance(raw, dict):
+        return {"probed": [], "waived": []}
+    intake = raw.get("intake")
+    if not isinstance(intake, dict):
+        return {"probed": [], "waived": []}
+    return {
+        "probed": [item for item in intake.get("probed") or [] if isinstance(item, str)],
+        "waived": [item for item in intake.get("waived") or [] if isinstance(item, str)],
+    }
+
+
 def _save(
     db, business, conversation, lead, photos, voice_notes, booking, quote,
-    *, facts, score_label, score_reason, handoff, handoff_reason, raw,
+    *, facts, score_label, score_reason, handoff, handoff_reason, raw, intake=None,
     escalated: bool = False, escalation_reason: str | None = None,
 ) -> dict:
+    if intake is None:
+        previous = _load_json(lead.get("extracted_json"), {})
+        if isinstance(previous, dict) and isinstance(previous.get("intake"), dict):
+            intake = previous.get("intake")
+    payload = {
+        "latest_tool_input": raw or facts,
+        "merged": facts,
+        "score": score_label,
+        "score_reason": score_reason,
+        "handoff": handoff,
+        "handoff_reason": handoff_reason,
+        "escalated": bool(escalated),
+        "escalation_reason": escalation_reason,
+    }
+    if intake is not None:
+        payload["intake"] = intake
     saved = db.save_job(
         lead["id"],
         {
@@ -933,19 +1006,7 @@ def _save(
             "voice_json": json.dumps(voice_notes),
             "quote_json": json.dumps(quote or {}),
             "booking_json": json.dumps(booking or {}),
-            "extracted_json": json.dumps(
-                {
-                    "latest_tool_input": raw or facts,
-                    "merged": facts,
-                    "score": score_label,
-                    "score_reason": score_reason,
-                    "handoff": handoff,
-                    "handoff_reason": handoff_reason,
-                    "escalated": bool(escalated),
-                    "escalation_reason": escalation_reason,
-                },
-                default=str,
-            ),
+            "extracted_json": json.dumps(payload, default=str),
         },
     )
     db.note_customer_facts(
