@@ -1,0 +1,70 @@
+{
+  "business_name": "Example Sparks Demo",
+  "trade": "electrician",
+  "assistant_name": "Demo Riley",
+  "owner_name": "Alex Example",
+  "area_name": "Sample Metro",
+  "timezone": "Australia/Sydney",
+  "currency": "AUD",
+  "slot_minutes": 90,
+  "booking_horizon_days": 10,
+  "banner": "FAKE example business for the eval harness. Not a real contractor, licence, or price list.",
+  "licence_no": "LIC-EXAMPLE-0001",
+  "callout_fee": "$95",
+  "callout_inclusions": "travel inside the sample suburbs and the first 30 minutes on site",
+  "after_hours_rate": "$140 per hour",
+  "quote_timeframe": "the next business day",
+  "callback_timeframe": "4pm today",
+  "gst_included": true,
+  "service_area_suburbs": [
+    "Parramatta",
+    "Exampleville",
+    "Sampletown",
+    "Demo Hill"
+  ],
+  "hours": {
+    "mon": ["07:30", "16:00"],
+    "tue": ["07:30", "16:00"],
+    "wed": ["07:30", "16:00"],
+    "thu": ["07:30", "16:00"],
+    "fri": ["07:30", "16:00"]
+  },
+  "job_types": [
+    {
+      "id": "fault",
+      "label": "Fault finding",
+      "emergency": true,
+      "aliases": ["fault", "no power", "power out", "safety switch", "tripping", "shock"],
+      "quote": {
+        "min_aud": 101,
+        "max_aud": 202,
+        "basis": "FAKE call-out and first hour"
+      }
+    },
+    {
+      "id": "power_point",
+      "label": "Power point or lighting",
+      "aliases": ["power point", "powerpoint", "downlight", "downlights", "light fitting"],
+      "quote": {
+        "min_aud": 111,
+        "max_aud": 222,
+        "basis": "FAKE supply and install range"
+      }
+    },
+    {
+      "id": "switchboard",
+      "label": "Switchboard upgrade",
+      "aliases": ["switchboard", "fuse board", "fuse box", "ceramic fuse"],
+      "quote": {
+        "min_aud": 3333,
+        "max_aud": 4444,
+        "basis": "FAKE board upgrade range"
+      }
+    }
+  ],
+  "source_tags": [
+    {"source": "website", "tags": ["(web)", "[web]"]},
+    {"source": "qr", "tags": ["(qr)", "[qr]"]}
+  ],
+  "sample_ads": []
+}

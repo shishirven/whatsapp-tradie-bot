@@ -46,6 +46,7 @@ from app.media import (
 )
 from app.messaging import DeliveryError, Inbound, MessagingGateway
 from app.notify import StaffNotifier
+from app.policy import apply_policy, asks_for_visit, guardrail_block
 from app.quotes import customer_quote_text, draft_quote, scrub_prices
 from app.routing import (
     KeywordIntentClassifier,
@@ -100,13 +101,13 @@ def build_system(
             f"Saved address: {saved_address}. "
             "Greet them by name and confirm that address. "
             "Ask only for facts that are not already on file. "
-            "Do not mention prices, quotes, or any other customer's jobs."
+            "Do not reveal another customer's jobs, quotes, addresses, or bookings."
         )
     elif established:
         relationship = (
             "This WhatsApp number is already a client. "
             "Greet them by name if you know it, and ask only for facts that are not already on file. "
-            "Do not mention prices, quotes, or any other customer's jobs."
+            "Do not reveal another customer's jobs, quotes, addresses, or bookings."
         )
     else:
         relationship = (
@@ -133,8 +134,8 @@ Rules:
 - Collect job type, suburb, urgency, a short description, preferred time, and the customer's name. Do not ask for a fact already on file.
 - Urgency is one of emergency, urgent, or planned.
 - If the suburb is outside the service area, say so and that a person can refer them. Still record the suburb.
-- If someone may be in danger, or they report burning, smoke, or a shock, tell them to leave and call 000, then keep the job details.
-- Do not mention prices, dollar amounts, or quote ranges. Do not invent a price. A person approves every quote before the customer sees it.
+- If someone may be in danger, or they report burning, smoke, or a shock, tell them to call 000 first, then keep the job details.
+- Do not mention prices except as an indicative range from the price book. Never invent a figure. If a configured value is missing, say you will confirm it.
 - The WhatsApp profile name is {who}. You may greet them with it. Do not store it as contact_name until they state their name.
 - When they ask for a human, set request_human to true and say you are bringing a person in.
 - On every turn, call the tool record_job_intake. Put the WhatsApp reply in reply. Use null for unknown facts. Repeat facts already known so the record stays complete.
@@ -143,6 +144,8 @@ Rules:
 Ad context: {ad_line}
 
 {relationship}
+
+{guardrail_block(business)}
 
 Facts already on file (JSON): {json.dumps(known, default=str)}
 
@@ -469,15 +472,31 @@ def handle_incoming(
     if handoff:
         reply = with_handoff_line(reply, business)
     reply = scrub_prices(_with_opening(opening, reply)) or _APOLOGY
+    decision = apply_policy(text or "", business)
+    if decision.replacement:
+        # Configured amounts are allowed through. The scrubber above already
+        # removed any figure the model invented on its own.
+        reply = _with_opening(opening, decision.replacement)
+    if decision.ensure_000 and "000" not in reply:
+        reply = f"Call 000 now. {reply}".strip()
+    reply = _name_earliest_slot(
+        reply, text or "", business, calendar, moment, offer_visit=decision.offer_visit
+    )
 
     saved = _save(
         db, business, conversation, lead, photos, voice_notes, booking, quote,
         facts=facts, score_label=score.label, score_reason=score.reason,
         handoff=handoff, handoff_reason=handoff_reason, raw=draft.raw or draft.facts(),
+        escalated=decision.escalated, escalation_reason=decision.escalation_reason,
     )
     if handoff and conversation["status"] != "handed_off":
         db.set_status(conversation["id"], "handed_off")
         _notify(notifier, saved, conversation, score.label, handoff_reason, facts)
+    elif decision.escalated:
+        _notify(
+            notifier, saved, conversation, score.label,
+            decision.escalation_reason or "escalated", facts,
+        )
 
     purpose = "booking_confirmation" if booked_reply else "session"
     return _finish(
@@ -674,6 +693,8 @@ def lead_out(row: dict, business: Business | None = None) -> dict:
         "score_reason": row.get("score_reason"),
         "handoff": bool(row.get("handoff")),
         "handoff_reason": row.get("handoff_reason"),
+        "escalated": bool(extracted.get("escalated")) if isinstance(extracted, dict) else False,
+        "escalation_reason": extracted.get("escalation_reason") if isinstance(extracted, dict) else None,
         "photos": _load_json(row.get("photos_json"), []),
         "voice_notes": _load_json(row.get("voice_json"), []),
         "quote": _load_json(row.get("quote_json"), {}) or None,
@@ -873,9 +894,32 @@ def _with_offer(reply: str, slots: list[Slot], preferred: str | None) -> str:
     return offer
 
 
+def _name_earliest_slot(
+    reply: str,
+    text: str,
+    business: Business,
+    calendar: Calendar | None,
+    moment: datetime,
+    *,
+    offer_visit: bool,
+) -> str:
+    """Name the next real calendar slot when they ask for a visit. Never invent one."""
+    if "reply 1, 2, or 3" in (reply or "").lower():
+        return reply
+    if not (offer_visit or asks_for_visit(text)):
+        return reply
+    if calendar is None:
+        return reply
+    slots = available_slots(business, calendar, moment)
+    if not slots or slots[0].label in reply:
+        return reply
+    return f"{reply} The earliest slot I have is {slots[0].label}."
+
+
 def _save(
     db, business, conversation, lead, photos, voice_notes, booking, quote,
     *, facts, score_label, score_reason, handoff, handoff_reason, raw,
+    escalated: bool = False, escalation_reason: str | None = None,
 ) -> dict:
     saved = db.save_job(
         lead["id"],
@@ -897,6 +941,8 @@ def _save(
                     "score_reason": score_reason,
                     "handoff": handoff,
                     "handoff_reason": handoff_reason,
+                    "escalated": bool(escalated),
+                    "escalation_reason": escalation_reason,
                 },
                 default=str,
             ),
