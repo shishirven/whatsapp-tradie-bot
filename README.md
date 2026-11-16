@@ -108,7 +108,7 @@ LLM_PROVIDER=gemini
 GEMINI_API_KEY=...
 ```
 
-The default model is `gemini-2.5-flash` (`GEMINI_MODEL`). Google has said that from 1 December 2026 requests to that id route to `gemini-3.5-flash-lite`. Set `GEMINI_MODEL` if you want a different id. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
+The default model is `gemini-3.8-flash` (`GEMINI_MODEL`). `gemini-2.5-flash` returns 404 for new API keys. Each Gemini request waits at most 20 seconds and is not retried. A timeout, a 404, a free-tier 429, or any other Gemini error uses the offline qualifier for that turn. A 404 is logged with the model id and the name `GEMINI_MODEL`. Free-tier limits are per Google project, not per key, and the live numbers are on the AI Studio rate-limit page. A project checked in October 2026 showed Flash-class models around 5 requests per minute, 250,000 input tokens per minute, and 20 requests per day, resetting at midnight Pacific. Those figures are not a guarantee. Each open-job message can use two calls (new-job check, then intake), so a busy day falls back to the offline qualifier instead of dropping the message.
 
 To answer with Claude instead:
 
@@ -157,7 +157,7 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 | `VERIFY_TOKEN` | String you type into the Meta webhook form. `WHATSAPP_VERIFY_TOKEN` is also accepted |
 | `APP_SECRET` | Meta app secret. When set, `POST /webhook` must carry a valid `X-Hub-Signature-256`. `WHATSAPP_APP_SECRET` is also accepted |
 | `GEMINI_API_KEY` | Gemini. Required when `LLM_PROVIDER=gemini`. Free key from [AI Studio](https://aistudio.google.com/apikey) |
-| `GEMINI_MODEL` | Defaults to `gemini-2.5-flash` |
+| `GEMINI_MODEL` | Defaults to `gemini-3.8-flash` |
 | `ANTHROPIC_API_KEY` | Claude. Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | Defaults to `claude-sonnet-5-5` |
 | `OPENAI_API_KEY` | Whisper. Voice notes are stored without a transcript until this is set |

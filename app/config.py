@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 _LLM_PROVIDERS = {"mock", "anthropic", "gemini"}
-_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+_DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 _MESSAGING_PROVIDERS = {"simulated", "whatsapp"}
 
 

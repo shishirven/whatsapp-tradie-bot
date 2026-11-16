@@ -32,7 +32,7 @@ def test_gemini_function_call_is_forced_and_prices_are_scrubbed(tmp_path, notifi
 
     qualifier = GeminiQualifier(
         "test-key",
-        "gemini-2.5-flash",
+        "gemini-3.8-flash",
         client=SimpleNamespace(models=Models()),
     )
     client = TestClient(
@@ -47,7 +47,7 @@ def test_gemini_function_call_is_forced_and_prices_are_scrubbed(tmp_path, notifi
     assert "Which suburb?" in result.json()["reply"]
     assert result.json()["lead"]["job_type"] == "switchboard"
     assert result.json()["lead"]["quote"]["status"] == "draft"
-    assert captured["model"] == "gemini-2.5-flash"
+    assert captured["model"] == "gemini-3.8-flash"
     config = captured["config"]
     mode = config.tool_config.function_calling_config.mode
     assert str(mode) == "ANY" or getattr(mode, "value", None) == "ANY"
@@ -64,7 +64,7 @@ def test_gemini_rate_limit_uses_the_offline_qualifier(tmp_path, notifier):
             error.code = 429
             raise error
 
-    qualifier = GeminiQualifier("test-key", "gemini-2.5-flash", client=SimpleNamespace(models=Models()))
+    qualifier = GeminiQualifier("test-key", "gemini-3.8-flash", client=SimpleNamespace(models=Models()))
     client = TestClient(
         create_app(settings=make_settings(tmp_path), qualifier=qualifier, notifier=notifier)
     )
@@ -88,7 +88,7 @@ def test_gemini_plain_text_stores_no_new_facts():
         def generate_content(self, **kwargs):
             return SimpleNamespace(text="Which suburb?", function_calls=[], candidates=[])
 
-    qualifier = GeminiQualifier("test-key", "gemini-2.5-flash", client=SimpleNamespace(models=Models()))
+    qualifier = GeminiQualifier("test-key", "gemini-3.8-flash", client=SimpleNamespace(models=Models()))
     draft = qualifier.qualify(_turn("Hi"))
     assert draft.reply == "Which suburb?"
     assert draft.job_type is None
@@ -112,21 +112,21 @@ def test_gemini_intent_reads_yes_or_no_and_a_429_uses_the_phrase_list():
 
     yes = Models("YES")
     classifier = GeminiIntentClassifier(
-        "test-key", "gemini-2.5-flash", client=SimpleNamespace(models=yes)
+        "test-key", "gemini-3.8-flash", client=SimpleNamespace(models=yes)
     )
     assert classifier.classify("the other house", job_summary="fault, Newtown") is True
     assert yes.calls == 1
 
     no = GeminiIntentClassifier(
         "test-key",
-        "gemini-2.5-flash",
+        "gemini-3.8-flash",
         client=SimpleNamespace(models=Models("NO")),
     )
     assert no.classify("the oven still trips it") is False
 
     limited = GeminiIntentClassifier(
         "test-key",
-        "gemini-2.5-flash",
+        "gemini-3.8-flash",
         client=SimpleNamespace(models=Models(boom=True)),
     )
     assert limited.classify("this is a different job") is True
@@ -147,10 +147,10 @@ def test_provider_switch_and_missing_gemini_key(tmp_path, monkeypatch, notifier)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     chosen = Settings.from_env()
     assert chosen.llm_provider == "gemini"
-    assert chosen.gemini_model == "gemini-2.5-flash"
+    assert chosen.gemini_model == "gemini-3.8-flash"
 
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-    assert Settings.from_env().gemini_model == "gemini-2.5-flash-lite"
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    assert Settings.from_env().gemini_model == "gemini-3.5-flash-lite"
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
@@ -163,7 +163,7 @@ def test_provider_switch_and_missing_gemini_key(tmp_path, monkeypatch, notifier)
         tmp_path,
         llm_provider="gemini",
         gemini_api_key="",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.8-flash",
     )
     missing = build_qualifier(business_settings, None)
     status = llm_status(business_settings, missing)
@@ -181,10 +181,54 @@ def test_provider_switch_and_missing_gemini_key(tmp_path, monkeypatch, notifier)
         "",
         "claude-sonnet-5-5",
         gemini_api_key="gem-test",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.8-flash",
     )
     assert isinstance(wired, GeminiIntentClassifier)
     assert isinstance(build_intent("mock", "", "claude-sonnet-5-5"), type(build_intent("anthropic", "", "x")))
+
+
+def test_not_found_names_the_model_and_the_client_does_not_retry(caplog):
+    import logging
+
+    from app.llm import gemini_client
+
+    class Models:
+        def generate_content(self, **kwargs):
+            error = Exception(
+                "404 NOT_FOUND. gemini-2.5-flash is no longer available to new users"
+            )
+            error.code = 404
+            error.status = "NOT_FOUND"
+            raise error
+
+    qualifier = GeminiQualifier(
+        "test-key",
+        "retired-model",
+        client=SimpleNamespace(models=Models()),
+    )
+    with caplog.at_level(logging.ERROR, logger="tradie.llm"):
+        draft = qualifier.qualify(_turn("board is smoking"))
+    assert "GEMINI_MODEL" in caplog.text
+    assert "retired-model" in caplog.text
+    assert "404" in caplog.text
+    assert draft.reply
+    assert "$" not in draft.reply
+
+    caplog.clear()
+    classifier = GeminiIntentClassifier(
+        "test-key",
+        "retired-model",
+        client=SimpleNamespace(models=Models()),
+    )
+    with caplog.at_level(logging.ERROR, logger="tradie.llm"):
+        assert classifier.classify("this is a different job") is True
+    assert "GEMINI_MODEL" in caplog.text
+    assert "retired-model" in caplog.text
+
+    client = gemini_client("test-key")
+    options = client._api_client._http_options
+    assert options.timeout == 20_000
+    assert options.retry_options.attempts == 1
 
 
 def _function_response(args):
