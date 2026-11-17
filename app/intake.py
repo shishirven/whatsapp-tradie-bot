@@ -753,8 +753,11 @@ def _join_question(model_reply: str, question: str | None, additions: dict, busi
 def _acknowledgement(facts: dict, business: Business) -> str:
     job = facts.get("job_type")
     if job:
-        label = business.job_label(job) or _cap(str(job))
-        return f"{label} — I'll put that on the job."
+        found = business.job(job)
+        if found:
+            return f"{found.label} — I'll put that on the job."
+        # Not a configured job: don't read the customer's sentence back to them.
+        return "Got it, I'll put that on the job."
     description = facts.get("description")
     if description:
         return f"{_cap(str(description))} — I've got that."

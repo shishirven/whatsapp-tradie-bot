@@ -286,7 +286,7 @@ def _identity_reply(business: Business) -> str:
     owner = business.owner_label()
     return (
         f"I'm {business.name}'s AI assistant. I handle enquiries and bookings so you get a fast reply, "
-        f"and {owner} reviews every job. Want me to have him call you?"
+        f"and {owner} reviews every job. Want me to have them call you?"
     )
 
 
@@ -567,7 +567,7 @@ def _complaint_reply(text: str, business: Business) -> str | None:
     if "invoice" in lowered and ("quote" in lowered or "more than" in lowered):
         return (
             f"I'm sorry this doesn't match what you expected. I'm sending this to {owner} to review "
-            f"against your quote, and he'll call you {by_when}. Could you send the invoice number?"
+            f"against your quote, and they'll call you {by_when}. Could you send the invoice number?"
         )
     if "flickering" in lowered or "fixed last week" in lowered:
         return (
@@ -586,8 +586,8 @@ def _complaint_reply(text: str, business: Business) -> str | None:
         )
     if "refund" in lowered:
         return (
-            f"I hear you. I can't approve refunds, but {owner} can. I've sent him your request "
-            f"and job details, and he'll call {by_when}. Anything you'd like me to add?"
+            f"I hear you. I can't approve refunds, but {owner} can. I've sent them your request "
+            f"and job details, and they'll call {by_when}. Anything you'd like me to add?"
         )
     if any(phrase in lowered for phrase in ("fair trading", "1-star", "one-star", "1 star")):
         return (
