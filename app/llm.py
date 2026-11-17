@@ -14,7 +14,8 @@ text is the reply and no new facts are stored.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import anthropic
 
@@ -122,6 +123,19 @@ _SAFETY = "If anyone is in danger, or you can smell burning, get out and call 00
 
 
 @dataclass
+class CallMeta:
+    """How one turn's reply was produced: who answered, how long, how many tokens, what failed."""
+
+    provider: str  # gemini, anthropic, offline, unconfigured
+    model: str | None = None  # the model that actually answered
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    attempts: list[dict] = field(default_factory=list)  # [{"model", "ms", "error"?}] in order
+    fallback_from: str | None = None  # "gemini" when every Gemini model failed
+    status: str = "ok"  # ok, fallback, unstructured, unconfigured
+
+
+@dataclass
 class QualificationDraft:
     """One turn: the WhatsApp reply, plus any facts stated in that turn."""
 
@@ -135,6 +149,7 @@ class QualificationDraft:
     contact_name: str | None = None
     hazard: str | None = None
     raw: dict | None = None
+    meta: CallMeta | None = None
     intake: dict | None = None
     intake_prompt: str | None = None
 
@@ -169,6 +184,7 @@ class AnthropicQualifier:
     def qualify(self, turn: TurnContext) -> QualificationDraft:
         # between_tools skips the long up-front thinking pass. Sonnet 5.5
         # rejects thinking type "disabled", and it also rejects forced tool_choice.
+        started = time.monotonic()
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1500,
@@ -178,7 +194,18 @@ class AnthropicQualifier:
             thinking={"type": "between_tools"},
             messages=to_api_messages(turn.history[-_MAX_HISTORY:]),
         )
-        return parse_qualification(response)
+        elapsed = _ms_since(started)
+        draft = parse_qualification(response)
+        usage = getattr(response, "usage", None)
+        draft.meta = CallMeta(
+            provider="anthropic",
+            model=_str_or_none(getattr(response, "model", None)) or self.model,
+            input_tokens=_int_or_none(getattr(usage, "input_tokens", None)),
+            output_tokens=_int_or_none(getattr(usage, "output_tokens", None)),
+            attempts=[{"model": self.model, "ms": elapsed}],
+            status="unstructured" if draft.raw == {"unstructured": True} else "ok",
+        )
+        return draft
 
 
 class GeminiQualifier:
@@ -218,7 +245,9 @@ class GeminiQualifier:
         )
         contents = to_gemini_contents(turn.history[-_MAX_HISTORY:])
         last_error: Exception | None = None
+        attempts: list[dict] = []
         for index, model in enumerate(self.models):
+            started = time.monotonic()
             try:
                 response = self.client.models.generate_content(
                     model=model,
@@ -227,6 +256,7 @@ class GeminiQualifier:
                 )
             except Exception as exc:
                 last_error = exc
+                attempts.append({"model": model, "ms": _ms_since(started), "error": _error_label(exc)})
                 if should_try_next_model(exc) and index < len(self.models) - 1:
                     logger.warning(
                         "gemini qualify model %s unavailable (%s); trying the next model",
@@ -235,12 +265,23 @@ class GeminiQualifier:
                     )
                     continue
                 log_gemini_failure("qualify", exc, model)
-                return self._offline.qualify(turn)
+                return self._fallback(turn, attempts)
+            elapsed = _ms_since(started)
             try:
                 draft = parse_gemini_qualification(response)
             except Exception as exc:
                 log_gemini_failure("qualify parse", exc, model)
-                return self._offline.qualify(turn)
+                attempts.append({"model": model, "ms": elapsed, "error": f"parse: {_error_label(exc)}"})
+                return self._fallback(turn, attempts)
+            attempts.append({"model": model, "ms": elapsed})
+            usage = getattr(response, "usage_metadata", None)
+            draft.meta = CallMeta(
+                provider="gemini",
+                model=model,
+                input_tokens=_int_or_none(getattr(usage, "prompt_token_count", None)),
+                output_tokens=_int_or_none(getattr(usage, "candidates_token_count", None)),
+                attempts=attempts,
+            )
             logger.info("gemini qualify answered with model %s", model)
             return draft
         log_gemini_failure(
@@ -248,7 +289,18 @@ class GeminiQualifier:
             last_error or RuntimeError("no gemini model configured"),
             self.model,
         )
-        return self._offline.qualify(turn)
+        return self._fallback(turn, attempts)
+
+    def _fallback(self, turn: TurnContext, attempts: list[dict]) -> QualificationDraft:
+        """Every Gemini model failed. The offline qualifier answers, and the record says so."""
+        draft = self._offline.qualify(turn)
+        draft.meta = CallMeta(
+            provider="offline",
+            attempts=attempts,
+            fallback_from="gemini",
+            status="fallback",
+        )
+        return draft
 
 
 class RuleBasedQualifier:
@@ -258,6 +310,11 @@ class RuleBasedQualifier:
         self.business = business or load_business()
 
     def qualify(self, turn: TurnContext) -> QualificationDraft:
+        draft = self._qualify(turn)
+        draft.meta = CallMeta(provider="offline")
+        return draft
+
+    def _qualify(self, turn: TurnContext) -> QualificationDraft:
         latest = _latest_user_text(turn.history)
         extracted = extract_facts(latest, self.business)
         asked = wants_human(latest)
@@ -318,6 +375,26 @@ class RuleBasedQualifier:
         )
 
 
+def _ms_since(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000))
+
+
+def _int_or_none(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _str_or_none(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _error_label(exc: Exception) -> str:
+    """Short, key-free description of a model error for the call record."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    name = type(exc).__name__
+    text = " ".join(str(exc).split())[:160]
+    return f"{code} {name}: {text}" if code else f"{name}: {text}"
+
+
 def _rule_hazard(text: str) -> str | None:
     hazard = classify_hazard(text)
     return hazard.kind if hazard else None
@@ -342,7 +419,12 @@ class MissingKeyQualifier:
                 "Add the key to your .env file, or unset LLM_PROVIDER to use the offline qualifier."
             )
         # intake is set so the service does not replace this explanation with a question.
-        return QualificationDraft(reply=reply, raw={"unconfigured": True}, intake=normalise_intake(None))
+        return QualificationDraft(
+            reply=reply,
+            raw={"unconfigured": True},
+            intake=normalise_intake(None),
+            meta=CallMeta(provider=self.provider, status="unconfigured"),
+        )
 
 
 def parse_qualification(response) -> QualificationDraft:

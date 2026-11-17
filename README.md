@@ -172,6 +172,27 @@ docker run --rm --name whatsapp-tradie-bot -p 8000:8000 --env-file .env -v whats
 
 The image stores SQLite at `/data/tradie.db`. Leave `SQLITE_PATH` commented out in `.env` so that path is not overridden. The process listens on `PORT` (8000 if unset).
 
+## Model calls, logs and traces
+
+Every customer message the bot answers writes one row to the `llm_calls` table. The row records:
+- **Who answered:** Gemini, Claude, or the offline stand-in, and the exact model.
+- **Timing and cost:** response time and tokens.
+- **Each attempt:** every fallback hop and its error.
+- **The output:** the model's raw tool output, the reply it wrote, and the reply actually sent.
+- **Hazards and guardrails:** the keyword and model hazard verdicts, and which guardrail rule replaced the reply (for example `safety:wire` or `price`).
+- **Versions:** a `prompt_version` id for the prompt template, business config and tool schema.
+
+Each distinct system prompt is stored once in `prompts`, so a turn can be replayed against a new prompt. Writing a record never blocks a reply.
+
+```bash
+python -m app.llm_log summary                    # volume, fallback rate, p50/p95 latency, tokens, hazards, disagreements
+python -m app.llm_log --since 2026-11-01 export calls.jsonl   # one row per turn, with empty label/note for error analysis
+```
+
+Logs: the app's own `tradie.*` loggers print to stdout at `LOG_LEVEL` (default `INFO`). Each turn logs one line, `turn {...}`, with the same summary. That line has no phone number or message text.
+
+Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` if the backend needs a key) to send OpenTelemetry traces to any OTLP backend, such as Langfuse, Arize Phoenix, Grafana or Honeycomb. Each message is a `whatsapp.turn` span with a `chat <model>` child that uses the GenAI semantic conventions (`gen_ai.provider.name`, `gen_ai.response.model`, `gen_ai.usage.*`). The `tradie.turn_id` attribute matches the `llm_calls` row. Spans carry no phone numbers or message text. With no endpoint set, tracing is off.
+
 ## Render
 
 `render.yaml` is a Docker web service on the **Starter** plan. Starter is paid and does not sleep, so Meta can reach the webhook. A free web service spins down and drops verification and message retries.

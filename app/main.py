@@ -20,6 +20,7 @@ from app.business import load_business
 from app.config import Settings
 from app.customers_io import ImportResult, import_csv_text
 from app.db import Database
+from app.telemetry import setup_logging, setup_tracing
 from app.llm import AnthropicQualifier, GeminiQualifier, MissingKeyQualifier, RuleBasedQualifier
 from app.media import (
     GraphMediaDownloader,
@@ -163,6 +164,8 @@ def create_app(
     intent=None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    setup_logging()
+    setup_tracing()
     clock = now or (lambda: datetime.now(timezone.utc))
     business = business or load_business(settings.business_config_path or None)
     db = Database(settings.sqlite_path, clock=clock)

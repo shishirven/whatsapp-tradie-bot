@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +37,10 @@ from app.booking import (
 from app.business import Business, load_business
 from app.db import Database
 from app.intake import apply_intake, delivered_intake, render_reply
+from app.hazards import classify_hazard
 from app.llm import TurnContext
+from app.llm_log import prompt_version, record_turn
+from app.telemetry import model_call_attributes, set_attributes, span
 from app.media import (
     MediaDownloader,
     MediaError,
@@ -58,7 +62,7 @@ from app.routing import (
     status_reply,
     suburb_in_address,
 )
-from app.scoring import canonical_facts, handoff_decision, merge_facts, score_lead, wants_human
+from app.scoring import FACT_KEYS, canonical_facts, handoff_decision, merge_facts, score_lead, wants_human
 from app.window import outbound_plan, parse_stored_time
 
 logger = logging.getLogger("tradie.service")
@@ -235,6 +239,32 @@ def handle_incoming(
     now: datetime | None = None,
     intent=None,
 ) -> dict:
+    """One customer message in, one reply out. Traced as `whatsapp.turn` when tracing is on."""
+    with span(
+        "whatsapp.turn",
+        {"messaging.system": "whatsapp", "tradie.message_type": inbound.message_type, "tradie.source": inbound.source},
+    ):
+        return _handle_incoming(
+            db, qualifier, gateway, notifier, inbound,
+            business=business, calendar=calendar, media=media, transcriber=transcriber,
+            now=now, intent=intent,
+        )
+
+
+def _handle_incoming(
+    db: Database,
+    qualifier,
+    gateway: MessagingGateway,
+    notifier: StaffNotifier,
+    inbound: Inbound,
+    *,
+    business: Business | None = None,
+    calendar: Calendar | None = None,
+    media: MediaDownloader | None = None,
+    transcriber: Transcriber | None = None,
+    now: datetime | None = None,
+    intent=None,
+) -> dict:
     business = business or load_business()
     moment = now or datetime.now(timezone.utc)
     if calendar is None:
@@ -354,7 +384,8 @@ def handle_incoming(
         conversation = db.set_status(conversation["id"], "open")
         route = "another"
 
-    db.add_message(conversation["id"], "in", body, inbound.provider_message_id, job_id=lead["id"])
+    inbound_row = db.add_message(conversation["id"], "in", body, inbound.provider_message_id, job_id=lead["id"])
+    turn_id = secrets.token_hex(8)
     # The message we just stored is the customer's latest message, so a reply
     # in this turn is inside the 24-hour window.
     last_customer_at = parse_stored_time(db.last_inbound_at(conversation["id"])) or moment
@@ -439,10 +470,33 @@ def handle_incoming(
         ),
         intake=intake_before,
     )
+    version = _prompt_version(business)
+    call_record = dict(
+        turn_id=turn_id,
+        conversation_id=conversation["id"],
+        job_id=lead["id"],
+        inbound_message_id=inbound_row.get("id"),
+        system_prompt=turn.system,
+        version=version,
+        history_len=len(history),
+    )
+    started = time.monotonic()
     try:
-        draft = qualifier.qualify(turn)
-    except Exception:
+        with span("chat", {"gen_ai.operation.name": "chat", "tradie.turn_id": turn_id}) as call_span:
+            draft = qualifier.qualify(turn)
+            attributes = model_call_attributes(getattr(draft, "meta", None))
+            set_attributes(call_span, attributes)
+            if call_span is not None and attributes.get("gen_ai.response.model"):
+                call_span.update_name(f"chat {attributes['gen_ai.response.model']}")
+    except Exception as exc:
         logger.exception("qualifier failed for conversation %s", conversation["id"])
+        record_turn(
+            db, **call_record,
+            latency_ms=int(round((time.monotonic() - started) * 1000)),
+            rule_hazard=classify_hazard(text),
+            sent_reply=_with_opening(opening, _APOLOGY),
+            error=f"{type(exc).__name__}: {' '.join(str(exc).split())[:200]}",
+        )
         _save(
             db, business, conversation, lead, photos, voice_notes, booking, quote,
             facts=known, score_label=lead["score"], score_reason=lead["score_reason"],
@@ -455,6 +509,7 @@ def handle_incoming(
             job_id=lead["id"],
         )
 
+    latency_ms = int(round((time.monotonic() - started) * 1000))
     facts, reply, intake_after, intake_prompt = _apply_draft(
         draft,
         text=text,
@@ -539,6 +594,16 @@ def handle_incoming(
             decision.escalation_reason or "escalated", facts,
         )
 
+    record_turn(
+        db, **call_record,
+        draft=draft,
+        latency_ms=latency_ms,
+        decision=decision,
+        rule_hazard=classify_hazard(text),
+        sent_reply=reply,
+        urgency=facts.get("urgency"),
+        handoff=bool(handoff),
+    )
     purpose = "booking_confirmation" if booked_reply else "session"
     return _finish(
         db, gateway, conversation, reply, business,
@@ -964,6 +1029,12 @@ def _cancel_reply(text: str, business: Business, calendar: Calendar | None, mome
     if slots:
         return f"No problem, I've cancelled {when}. The earliest slot I have is {slots[0].label}."
     return f"No problem, I've cancelled {when}."
+
+
+def _prompt_version(business: Business) -> str:
+    """Id of the prompt template, business config and tool schema, without any customer's facts."""
+    empty = {key: None for key in FACT_KEYS}
+    return prompt_version(build_system(empty, None, None, business))
 
 
 def _strip_false_emergency(reply: str) -> str:
