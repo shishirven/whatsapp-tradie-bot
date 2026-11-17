@@ -225,6 +225,44 @@ def test_not_found_names_the_model_and_the_client_does_not_retry(caplog):
     assert "GEMINI_MODEL" in caplog.text
     assert "retired-model" in caplog.text
 
+    class Flaky:
+        def __init__(self):
+            self.models_called = []
+
+        def generate_content(self, **kwargs):
+            self.models_called.append(kwargs["model"])
+            if kwargs["model"] == "gemini-3.8-flash":
+                error = Exception("503 UNAVAILABLE")
+                error.code = 503
+                raise error
+            call = SimpleNamespace(
+                name="record_job_intake",
+                args={
+                    "reply": "Which suburb?",
+                    "request_human": False,
+                    "job_type": None,
+                    "suburb": None,
+                    "urgency": None,
+                    "description": None,
+                    "preferred_time": None,
+                    "contact_name": None,
+                },
+            )
+            return SimpleNamespace(function_calls=[call], text=None, candidates=[])
+
+    flaky = Flaky()
+    fallback = GeminiQualifier(
+        "test-key",
+        "gemini-3.8-flash",
+        client=SimpleNamespace(models=flaky),
+        fallback_models=["gemini-3.5-flash-lite"],
+    )
+    with caplog.at_level(logging.INFO, logger="tradie.llm"):
+        answered = fallback.qualify(_turn("need a power point"))
+    assert answered.reply == "Which suburb?"
+    assert flaky.models_called == ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    assert "answered with model gemini-3.5-flash-lite" in caplog.text
+
     client = gemini_client("test-key")
     options = client._api_client._http_options
     assert options.timeout == 20_000

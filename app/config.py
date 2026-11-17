@@ -38,6 +38,7 @@ class Settings:
     business_config_path: str = ""
     gemini_api_key: str = ""
     gemini_model: str = _DEFAULT_GEMINI_MODEL
+    gemini_fallback_models: str = ""
 
     def __post_init__(self) -> None:
         if self.llm_provider not in _LLM_PROVIDERS:
@@ -100,7 +101,14 @@ class Settings:
             gemini_api_key=gemini_key,
             gemini_model=os.getenv("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL).strip()
             or _DEFAULT_GEMINI_MODEL,
+            gemini_fallback_models=_env("GEMINI_FALLBACK_MODELS"),
         )
+
+    def gemini_model_list(self) -> list[str]:
+        from app.llm import model_chain
+
+        extra = [part.strip() for part in (self.gemini_fallback_models or "").split(",")]
+        return model_chain(self.gemini_model, extra)
 
 
 def _env(*names: str) -> str:

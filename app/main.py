@@ -89,6 +89,7 @@ def build_qualifier(settings: Settings, business):
             settings.gemini_api_key,
             settings.gemini_model,
             business=business,
+            fallback_models=settings.gemini_model_list()[1:],
         )
     if not settings.anthropic_api_key:
         return MissingKeyQualifier("anthropic")

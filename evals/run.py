@@ -42,13 +42,24 @@ def main(argv: list[str] | None = None) -> int:
         default="evals/results",
         help="Directory for the JSON and Markdown reports.",
     )
+    parser.add_argument(
+        "--rpm",
+        type=int,
+        default=0,
+        help="Max Gemini calls per minute. 0 paces nothing. Use 5 on the free tier.",
+    )
     args = parser.parse_args(argv)
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
     offline = bool(args.offline) or not os.getenv("GEMINI_API_KEY", "").strip()
     if not args.offline and offline:
         print("GEMINI_API_KEY is not set; running deterministic checks only.")
-    report = run_eval(offline=offline, repeats=args.repeats, results_dir=args.results_dir)
+    report = run_eval(
+        offline=offline,
+        repeats=args.repeats,
+        results_dir=args.results_dir,
+        rpm=args.rpm or None,
+    )
     print_table(report)
     print(f"Wrote {args.results_dir}/latest.json and latest.md")
     return 0

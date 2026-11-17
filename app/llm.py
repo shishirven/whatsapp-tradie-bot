@@ -159,10 +159,18 @@ class AnthropicQualifier:
 
 
 class GeminiQualifier:
-    """Gemini function call. A 429 or any other API error uses the offline qualifier."""
+    """Gemini function call. A 404, 429, 503, or 504 tries the next model, then the offline qualifier."""
 
-    def __init__(self, api_key: str, model: str, client=None, business: Business | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        client=None,
+        business: Business | None = None,
+        fallback_models: list[str] | None = None,
+    ) -> None:
         self.model = model
+        self.models = model_chain(model, fallback_models or [])
         self._offline = RuleBasedQualifier(business)
         if client is not None:
             self.client = client
@@ -170,34 +178,54 @@ class GeminiQualifier:
             self.client = gemini_client(api_key)
 
     def qualify(self, turn: TurnContext) -> QualificationDraft:
-        try:
-            from google.genai import types
+        from google.genai import types
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=to_gemini_contents(turn.history[-_MAX_HISTORY:]),
-                config=types.GenerateContentConfig(
-                    system_instruction=turn.system,
-                    tools=[_gemini_tool()],
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                    tool_config=types.ToolConfig(
-                        function_calling_config=types.FunctionCallingConfig(
-                            mode="ANY",
-                            allowed_function_names=[QUALIFY_TOOL["name"]],
-                        )
-                    ),
-                    max_output_tokens=1500,
-                    temperature=0,
-                ),
-            )
-        except Exception as exc:
-            log_gemini_failure("qualify", exc, self.model)
-            return self._offline.qualify(turn)
-        try:
-            return parse_gemini_qualification(response)
-        except Exception as exc:
-            log_gemini_failure("qualify parse", exc, self.model)
-            return self._offline.qualify(turn)
+        config = types.GenerateContentConfig(
+            system_instruction=turn.system,
+            tools=[_gemini_tool()],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowed_function_names=[QUALIFY_TOOL["name"]],
+                )
+            ),
+            max_output_tokens=1500,
+            temperature=0,
+        )
+        contents = to_gemini_contents(turn.history[-_MAX_HISTORY:])
+        last_error: Exception | None = None
+        for index, model in enumerate(self.models):
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:
+                last_error = exc
+                if should_try_next_model(exc) and index < len(self.models) - 1:
+                    logger.warning(
+                        "gemini qualify model %s unavailable (%s); trying the next model",
+                        model,
+                        exc,
+                    )
+                    continue
+                log_gemini_failure("qualify", exc, model)
+                return self._offline.qualify(turn)
+            try:
+                draft = parse_gemini_qualification(response)
+            except Exception as exc:
+                log_gemini_failure("qualify parse", exc, model)
+                return self._offline.qualify(turn)
+            logger.info("gemini qualify answered with model %s", model)
+            return draft
+        log_gemini_failure(
+            "qualify",
+            last_error or RuntimeError("no gemini model configured"),
+            self.model,
+        )
+        return self._offline.qualify(turn)
 
 
 class RuleBasedQualifier:
@@ -473,7 +501,9 @@ def _clean_str(value: object) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
-    return text or None
+    if not text or text.casefold() in {"null", "none", "undefined", "nil", "n/a"}:
+        return None
+    return text
 
 
 def _clean_bool(value: object) -> bool:
@@ -611,6 +641,35 @@ def _is_not_found(exc: Exception) -> bool:
         return True
     text = str(exc).lower()
     return ("404" in text and "not_found" in text) or "no longer available" in text
+
+
+def model_chain(primary: str, fallbacks: list[str] | None = None) -> list[str]:
+    """Primary model, then each fallback, with blanks and duplicates removed."""
+    chain: list[str] = []
+    for name in [primary, *(fallbacks or [])]:
+        text = (name or "").strip()
+        if text and text not in chain:
+            chain.append(text)
+    return chain or ["gemini-3.8-flash"]
+
+
+def should_try_next_model(exc: Exception) -> bool:
+    """True when another model might answer: not found, rate limit, or the model is down."""
+    code = _status_code(exc)
+    if code in {404, 429, 503, 504}:
+        return True
+    text = str(exc).lower()
+    if any(token in text for token in ("503", "504", "unavailable", "deadline exceeded", "timed out")):
+        return True
+    return _is_not_found(exc) or _is_rate_limit(exc)
+
+
+def _status_code(exc: Exception) -> int | None:
+    for attr in ("code", "status_code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
 
 
 def _is_rate_limit(exc: Exception) -> bool:

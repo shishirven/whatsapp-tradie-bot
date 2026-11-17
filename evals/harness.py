@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -65,6 +66,7 @@ def run_eval(
     api_key: str | None = None,
     judge_model: str | None = None,
     reply_model: str | None = None,
+    rpm: int | None = None,
 ) -> dict:
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
@@ -79,6 +81,7 @@ def run_eval(
     clients = load_clients()
     slots = _slots(business)
     values = _base_values(business, slots)
+    pacer = _Pacer(rpm)
     case_reports = []
     for case in golden["cases"]:
         case_reports.append(
@@ -95,6 +98,7 @@ def run_eval(
                 api_key=key,
                 reply_model=reply,
                 judge_model=judge,
+                pacer=pacer,
             )
         )
     passed_count = sum(1 for case in case_reports if case["pass"])
@@ -262,6 +266,7 @@ def _run_case(
     api_key,
     reply_model,
     judge_model,
+    pacer,
 ) -> dict:
     runs = []
     for index in range(repeats):
@@ -279,6 +284,7 @@ def _run_case(
                 api_key=api_key,
                 reply_model=reply_model,
                 judge_model=judge_model,
+                pacer=pacer,
             )
         )
     summary = summarise_repeats(runs)
@@ -351,6 +357,7 @@ def _run_once(
     api_key,
     reply_model,
     judge_model,
+    pacer,
 ) -> dict:
     variants = case.get("variants") or [None]
     variant_runs = []
@@ -370,6 +377,7 @@ def _run_once(
                 api_key=api_key,
                 reply_model=reply_model,
                 judge_model=judge_model,
+                pacer=pacer,
             )
         )
     checks = [item for run in variant_runs for item in run["checks"]]
@@ -420,6 +428,7 @@ def _run_variant(
     api_key,
     reply_model,
     judge_model,
+    pacer,
 ) -> dict:
     setup = dict(case.get("setup") or {})
     variant_name = None
@@ -459,6 +468,7 @@ def _run_variant(
         offline=offline,
         api_key=api_key,
         reply_model=reply_model,
+        pacer=pacer,
     )
     expected_name = None
     expected_address = None
@@ -481,6 +491,7 @@ def _run_variant(
     judge_pass = None
     judge_reason = ""
     if not offline:
+        pacer.wait()
         verdict = grade(
             api_key=api_key,
             model=judge_model,
@@ -503,7 +514,7 @@ def _run_variant(
     }
 
 
-def _send(*, business, clients, setup, text, sender_phone, photo, message_id, offline, api_key, reply_model) -> dict:
+def _send(*, business, clients, setup, text, sender_phone, photo, message_id, offline, api_key, reply_model, pacer) -> dict:
     path = _fresh_db()
     try:
         return _send_into(
@@ -518,12 +529,13 @@ def _send(*, business, clients, setup, text, sender_phone, photo, message_id, of
             offline=offline,
             api_key=api_key,
             reply_model=reply_model,
+            pacer=pacer,
         )
     finally:
         _discard(path)
 
 
-def _send_into(path, *, business, clients, setup, text, sender_phone, photo, message_id, offline, api_key, reply_model) -> dict:
+def _send_into(path, *, business, clients, setup, text, sender_phone, photo, message_id, offline, api_key, reply_model, pacer) -> dict:
     db = Database(path)
     for record in clients.values():
         db.import_client(
@@ -539,7 +551,7 @@ def _send_into(path, *, business, clients, setup, text, sender_phone, photo, mes
     qualifier = (
         RuleBasedQualifier(business)
         if offline or not api_key
-        else GeminiQualifier(api_key, reply_model, business=business)
+        else _Paced(GeminiQualifier(api_key, reply_model, business=business), pacer)
     )
     intent = build_intent(
         "mock" if offline or not api_key else "gemini",
@@ -670,6 +682,32 @@ def _slots(business: Business) -> list:
         return available_slots(business, DatabaseCalendar(Database(path)), EVAL_NOW)
     finally:
         _discard(path)
+
+
+class _Pacer:
+    """Space Gemini calls so a free-tier limit is not spent in one burst."""
+
+    def __init__(self, rpm: int | None) -> None:
+        self.gap = 0.0 if not rpm or rpm <= 0 else 60.0 / rpm
+        self._next = 0.0
+
+    def wait(self) -> None:
+        if self.gap <= 0:
+            return
+        now = time.monotonic()
+        if now < self._next:
+            time.sleep(self._next - now)
+        self._next = time.monotonic() + self.gap
+
+
+class _Paced:
+    def __init__(self, inner, pacer: _Pacer) -> None:
+        self.inner = inner
+        self.pacer = pacer
+
+    def qualify(self, turn):
+        self.pacer.wait()
+        return self.inner.qualify(turn)
 
 
 def _discard(path: str) -> None:

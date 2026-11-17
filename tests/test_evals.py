@@ -30,8 +30,8 @@ def test_shipped_human_labels_are_still_todo():
 def test_judge_model_is_separate_from_the_reply_model(monkeypatch):
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     assert resolve_judge_model() == DEFAULT_JUDGE_MODEL
+    assert DEFAULT_JUDGE_MODEL == "gemini-3.1-flash-lite"
     assert DEFAULT_JUDGE_MODEL != DEFAULT_REPLY_MODEL
-    assert "pro" in DEFAULT_JUDGE_MODEL
     assert "flash" in DEFAULT_REPLY_MODEL
     monkeypatch.setenv("JUDGE_MODEL", "gemini-eval-judge")
     assert resolve_judge_model() == "gemini-eval-judge"
@@ -118,8 +118,6 @@ def test_offline_run_scores_every_case_without_calling_the_judge(tmp_path, monke
     assert render_markdown(saved)
     assert all(case["judge"] is None for case in saved["cases"])
     assert all(case["deterministic"]["checks"] for case in saved["cases"])
-    # Guardrails the pipeline now enforces. The rest of the set is allowed to fail.
-    required = {6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 28, 29, 30}
-    failed = {case["id"] for case in saved["cases"] if not case["pass"]}
-    assert required.isdisjoint(failed)
+    assert saved["passed"] == 30
+    assert saved["pass_rate"] == 1
     assert saved["business"] == "Example Sparks Demo"
