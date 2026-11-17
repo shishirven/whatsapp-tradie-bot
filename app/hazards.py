@@ -34,6 +34,42 @@ class Hazard:
     tier: str
 
 
+# Every hazard kind and its tier. The model's `hazard` field uses these names.
+HAZARD_TIERS = {
+    "life_support": EMERGENCY,
+    "person_down": EMERGENCY,
+    "powerline": EMERGENCY,
+    "wire": EMERGENCY,
+    "shock": EMERGENCY,
+    "fire": EMERGENCY,
+    "water": URGENT,
+    "overheating": URGENT,
+    "battery": URGENT,
+    "street_outage": REDIRECT,
+}
+
+# What the model may report. life_support is left to the keyword rules.
+MODEL_HAZARDS = (
+    "none",
+    "wire",
+    "powerline",
+    "shock",
+    "person_down",
+    "fire",
+    "water",
+    "overheating",
+    "battery",
+    "street_outage",
+)
+
+
+def hazard_from_kind(kind: str | None) -> Hazard | None:
+    """A Hazard for a kind name the model returned. Unknown names and "none" are None."""
+    name = (kind or "").strip().casefold()
+    tier = HAZARD_TIERS.get(name)
+    return Hazard(name, tier) if tier else None
+
+
 # --- smoke alarms -----------------------------------------------------------
 # "Smoke" inside "smoke alarm" names a device, not a fire. A beeping alarm is
 # a battery or an expired unit. An alarm that is actually going off may be a fire.
