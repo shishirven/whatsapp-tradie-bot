@@ -107,7 +107,8 @@ def extract_job_type(text: str, business: Business | None = None) -> str | None:
     matches: list[tuple[int, int, str, bool]] = []
     for job in business.job_types:
         for alias in job.aliases:
-            match = re.search(rf"\b{re.escape(alias.casefold())}\b", lowered)
+            # Allow a plural: "downlights", "power points", "smoke alarms".
+            match = re.search(rf"\b{re.escape(alias.casefold())}(?:e?s)?\b", lowered)
             if match:
                 matches.append((match.start(), -len(alias), job.id, job.emergency))
     if not matches:
