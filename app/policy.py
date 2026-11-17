@@ -17,7 +17,15 @@ import re
 from dataclasses import dataclass
 
 from app.business import Business
-from app.hazards import EMERGENCY, REDIRECT, URGENT, Hazard, classify_hazard, hazard_from_kind
+from app.hazards import (
+    EMERGENCY,
+    REDIRECT,
+    URGENT,
+    Hazard,
+    classify_hazard,
+    hazard_from_kind,
+    mentions_alarm_device,
+)
 
 logger = logging.getLogger("tradie.policy")
 
@@ -84,6 +92,11 @@ def resolve_hazard(text: str | None, model_hazard: str | None = None, *, log: bo
     """
     rule = classify_hazard(text)
     model = hazard_from_kind(model_hazard)
+    if model is not None and model.kind == "fire" and mentions_alarm_device((text or "").casefold()):
+        # The rules found no smoke, flames or burning beyond the alarm itself, so the
+        # model is reading "fire alarm" as a fire. Use the alarm script, which still says 000.
+        if rule is None or rule.kind != "fire":
+            model = Hazard("alarm", URGENT)
     if log and (rule.kind if rule else None) != (model.kind if model else None):
         # Each disagreement is a missed phrasing for one side. Review these to grow the rules.
         logger.info(
@@ -134,6 +147,12 @@ def apply_policy(text: str, business: Business, model_hazard: str | None = None)
     safety = _safety_reply(hazard, business)
     if safety:
         replacement = safety
+    elif _asks_fire_brigade_or_us(lowered):
+        replacement = (
+            "Call the fire brigade on 000 if there's any smoke, burning smell, heat or flames, "
+            "or if you're not sure. If there's no sign of fire and the alarm keeps going off, "
+            "it's a faulty alarm and that's us: we'll test, clean or replace it. Which suburb are you in?"
+        )
     elif _is_injection(lowered):
         replacement = (
             "I can't do that, but I'm happy to help with a quote or booking. "
@@ -369,6 +388,11 @@ def _alias_in(alias: str, lowered: str) -> bool:
     return re.search(rf"\b{re.escape(alias)}s?\b", lowered) is not None
 
 
+def _asks_fire_brigade_or_us(lowered: str) -> bool:
+    """'Should it be you or the fire department?' Typos included."""
+    return re.search(r"\bfire[\s-]*(?:dep\w*|brig\w*|serv\w*|fight\w*|truck|engine|station)", lowered) is not None
+
+
 def _is_injection(lowered: str) -> bool:
     return any(
         phrase in lowered
@@ -475,6 +499,14 @@ def _safety_reply(hazard: Hazard | None, business: Business) -> str | None:
             "That needs urgent attention. If you see smoke, flames or sparks, call 000 now. "
             "If it's safe, turn off the main switch and keep clear of the board. "
             f"I'm alerting {owner} right now. What's your address?"
+        ),
+        "alarm": (
+            "If there's any smoke, burning smell, heat or flames, get everyone out and call 000 "
+            "from outside. That's for the fire brigade. If there's no sign of fire, it's most likely "
+            "a faulty alarm (dust, insects, steam, a weak battery, or an alarm past its 10-year life), "
+            "and that's our job: we can test, clean or replace it. Please don't pull down a "
+            f"hard-wired alarm yourself. I'm flagging this with {owner}. "
+            "Can you see or smell any smoke?"
         ),
         "battery": (
             "Please keep everyone away from it and don't move or open it. If it smokes, hisses or "

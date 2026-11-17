@@ -216,6 +216,8 @@ def _hazard_job(text: str, business: Business) -> str | None:
     hazard = classify_hazard(text)
     if hazard is None or hazard.tier not in (EMERGENCY, URGENT):
         return None
+    if hazard.kind == "alarm" and business.resolve_job_type("smoke_alarm"):
+        return "smoke_alarm"
     for job in business.job_types:
         if job.emergency:
             return job.id

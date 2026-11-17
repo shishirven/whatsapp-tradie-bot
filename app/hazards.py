@@ -42,6 +42,7 @@ HAZARD_TIERS = {
     "wire": EMERGENCY,
     "shock": EMERGENCY,
     "fire": EMERGENCY,
+    "alarm": URGENT,
     "water": URGENT,
     "overheating": URGENT,
     "battery": URGENT,
@@ -56,6 +57,7 @@ MODEL_HAZARDS = (
     "shock",
     "person_down",
     "fire",
+    "alarm",
     "water",
     "overheating",
     "battery",
@@ -71,27 +73,33 @@ def hazard_from_kind(kind: str | None) -> Hazard | None:
 
 
 # --- smoke alarms -----------------------------------------------------------
-# "Smoke" inside "smoke alarm" names a device, not a fire. A beeping alarm is
-# a battery or an expired unit. An alarm that is actually going off may be a fire.
+# "Smoke" or "fire" inside "smoke alarm" / "fire alarm" names a device, not a fire.
+# A beeping or chirping alarm is a battery or an expired unit: an ordinary job.
+# An alarm that is going off (once or again and again) gets the "alarm" script:
+# any sign of fire means get out and call 000; otherwise it is a faulty alarm for us.
 
-_ALARM_DEVICE = re.compile(r"\bsmoke[\s-]*(?:alarm|detector)s?\b")
+_ALARM_DEVICE = re.compile(r"\b(?:smoke|fire)[\s-]*(?:alarm|detector)(?:s|a|as)?\b")
 _ALARM_SOUNDING = re.compile(
-    r"\b(?:going off|went off|gone off|goes off|go off|sounding|blaring|screaming|activated)\b"
+    r"\b(?:going off|went off|gone off|goes off|go off|keeps? going|sounding|blaring|screaming|"
+    r"ringing|activat\w*|trigger\w*|set off|sets off)\b"
 )
 _ALARM_MAINTENANCE = re.compile(
     r"\b(?:beep\w*|chirp\w*|batter(?:y|ies)|replac\w*|install\w*|expir\w*|"
-    r"end of life|flashing|blinking|test\w*|upgrad\w*|compliance|"
-    r"no reason|false alarm|nuisance|randomly)\b"
+    r"end of life|flashing|blinking|test\w*|upgrad\w*|compliance)\b"
 )
 
 
 def without_alarm_devices(lowered: str) -> str:
-    """Remove 'smoke alarm' / 'smoke detector' so the device name is not read as smoke."""
+    """Remove 'smoke alarm' / 'fire alarm' / 'smoke detector' so the device name is not read as a fire."""
     return _ALARM_DEVICE.sub(" ", lowered)
 
 
+def mentions_alarm_device(lowered: str) -> bool:
+    return _ALARM_DEVICE.search(lowered) is not None
+
+
 def smoke_alarm_sounding(lowered: str) -> bool:
-    """A smoke alarm that is going off, not one that is chirping for a battery."""
+    """A smoke or fire alarm that is going off, not one that is chirping for a battery."""
     if not _ALARM_DEVICE.search(lowered):
         return False
     return bool(_ALARM_SOUNDING.search(lowered)) and not _ALARM_MAINTENANCE.search(lowered)
@@ -201,8 +209,10 @@ def classify_hazard(text: str | None) -> Hazard | None:
         return Hazard("wire", EMERGENCY)
     if _SHOCK.search(plain) and not _NOT_SHOCK.search(plain):
         return Hazard("shock", EMERGENCY)
-    if _FIRE.search(plain) or smoke_alarm_sounding(lowered):
+    if _FIRE.search(plain):
         return Hazard("fire", EMERGENCY)
+    if smoke_alarm_sounding(lowered):
+        return Hazard("alarm", URGENT)
     if _BATTERY.search(plain) and _BATTERY_STATE.search(plain):
         return Hazard("battery", URGENT)
     if _WATER_HAZARD.search(plain) or _FLOODED.search(plain):
