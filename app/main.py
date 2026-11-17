@@ -20,6 +20,7 @@ from app.business import load_business
 from app.config import Settings
 from app.customers_io import ImportResult, import_csv_text
 from app.db import Database
+from app.log_shipper import LogShipper
 from app.telemetry import setup_logging, setup_tracing
 from app.llm import AnthropicQualifier, GeminiQualifier, MissingKeyQualifier, RuleBasedQualifier
 from app.media import (
@@ -183,6 +184,9 @@ def create_app(
         gemini_api_key=settings.gemini_api_key,
         gemini_model=settings.gemini_model,
     )
+
+    if settings.log_bucket:
+        LogShipper(db, settings.log_bucket, interval=settings.log_ship_interval).start()
 
     app = FastAPI(title=APP_NAME, docs_url="/docs")
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")

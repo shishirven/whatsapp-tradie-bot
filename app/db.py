@@ -156,6 +156,13 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created ON llm_calls(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_conversation ON llm_calls(conversation_id, id);
 
+-- How far each export (e.g. llm_calls to S3) has got.
+CREATE TABLE IF NOT EXISTS ship_marks (
+    name TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Each distinct system prompt, stored once and referenced by hash.
 CREATE TABLE IF NOT EXISTS prompts (
     hash TEXT PRIMARY KEY,
@@ -505,7 +512,9 @@ class Database:
             )
             return int(cursor.lastrowid)
 
-    def list_llm_calls(self, *, since: str | None = None, limit: int | None = None) -> list[dict]:
+    def list_llm_calls(
+        self, *, since: str | None = None, limit: int | None = None, after_id: int | None = None
+    ) -> list[dict]:
         """Model calls, oldest first, with the customer's message text joined in."""
         sql = """
             SELECT c.*, m.body AS inbound_text
@@ -513,15 +522,37 @@ class Database:
             LEFT JOIN messages m ON m.id = c.inbound_message_id
         """
         params: list = []
+        where = []
         if since:
-            sql += " WHERE c.created_at >= ?"
+            where.append("c.created_at >= ?")
             params.append(since)
+        if after_id is not None:
+            where.append("c.id > ?")
+            params.append(int(after_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY c.id"
         if limit:
             sql += " LIMIT ?"
             params.append(int(limit))
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def get_ship_mark(self, name: str) -> int:
+        """Id of the last row an export has delivered (0 when it has never run)."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT last_id FROM ship_marks WHERE name = ?", (name,)).fetchone()
+        return int(row["last_id"]) if row else 0
+
+    def set_ship_mark(self, name: str, last_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ship_marks (name, last_id, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at
+                """,
+                (name, int(last_id), self.timestamp()),
+            )
 
     def get_prompt(self, system_hash: str) -> str | None:
         with self.connect() as conn:

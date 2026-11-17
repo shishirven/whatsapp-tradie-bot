@@ -43,6 +43,9 @@ class Settings:
     owner_alert_language: str = "en"
     # Public URL of this app, used for the staff-desk link in alerts.
     public_base_url: str = ""
+    # S3 bucket for llm_calls uploads. Empty: no uploads. Keys come from AWS_* variables.
+    log_bucket: str = ""
+    log_ship_interval: int = 300
     gemini_api_key: str = ""
     gemini_model: str = _DEFAULT_GEMINI_MODEL
     gemini_fallback_models: str = ""
@@ -109,6 +112,8 @@ class Settings:
             owner_alert_template=_env("OWNER_ALERT_TEMPLATE"),
             owner_alert_language=_env("OWNER_ALERT_LANGUAGE") or "en",
             public_base_url=_env("PUBLIC_BASE_URL"),
+            log_bucket=_env("LOG_BUCKET"),
+            log_ship_interval=_int_env("LOG_SHIP_INTERVAL_SECONDS", 300),
             gemini_api_key=gemini_key,
             gemini_model=os.getenv("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL).strip()
             or _DEFAULT_GEMINI_MODEL,
@@ -128,3 +133,10 @@ def _env(*names: str) -> str:
         if value and value.strip():
             return value.strip()
     return ""
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default

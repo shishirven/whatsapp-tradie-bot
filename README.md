@@ -232,6 +232,13 @@ python -m app.llm_log summary                    # volume, fallback rate, p50/p9
 python -m app.llm_log --since 2026-11-01 export calls.jsonl   # one row per turn, with empty label/note for error analysis
 ```
 
+Copy to S3: set `LOG_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (an IAM user that can only reach that bucket) and `AWS_REGION` (default `ap-southeast-2`). Every 5 minutes (`LOG_SHIP_INTERVAL_SECONDS`), new rows are uploaded as gzipped JSON Lines to `s3://<LOG_BUCKET>/llm_calls/dt=YYYY-MM-DD/<first id>-<last id>.jsonl.gz`. A failed upload is retried and no rows are skipped. The files hold customers' words and the replies sent, so keep the bucket private.
+
+```bash
+python -m app.llm_log s3-check   # write, read back and delete a test file: proves the keys and bucket work
+python -m app.llm_log ship       # upload everything new right now
+```
+
 Logs: the app's own `tradie.*` loggers print to stdout at `LOG_LEVEL` (default `INFO`). Each turn logs one line, `turn {...}`, with the same summary. That line has no phone number or message text.
 
 Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` if the backend needs a key) to send OpenTelemetry traces to any OTLP backend, such as Langfuse, Arize Phoenix, Grafana or Honeycomb. Each message is a `whatsapp.turn` span with a `chat <model>` child that uses the GenAI semantic conventions (`gen_ai.provider.name`, `gen_ai.response.model`, `gen_ai.usage.*`). The `tradie.turn_id` attribute matches the `llm_calls` row. Spans carry no phone numbers or message text. With no endpoint set, tracing is off.
