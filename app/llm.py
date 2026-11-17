@@ -14,6 +14,7 @@ text is the reply and no new facts are stored.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -65,7 +66,10 @@ QUALIFY_TOOL = {
             },
             "urgency": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                "description": "emergency, urgent, planned, or null.",
+                "description": (
+                    "emergency, urgent, planned, or null. Only what the customer has said about "
+                    "how soon it's needed; picking a visit time is not an urgency."
+                ),
             },
             "hazard": {
                 "type": "string",
@@ -118,6 +122,7 @@ QUALIFY_TOOL = {
 }
 
 _FALLBACK_REPLY = "Could you tell me a little more about the job?"
+_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _MAX_HISTORY = 20
 _SAFETY = "If anyone is in danger, or you can smell burning, get out and call 000."
 
@@ -626,7 +631,8 @@ def _user_turns(history: list[dict]) -> int:
 def _clean_str(value: object) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    # Gemini sometimes writes "–" as the literal text "\u2013" inside tool arguments.
+    text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(value)).strip()
     if not text or text.casefold() in {"null", "none", "undefined", "nil", "n/a"}:
         return None
     return text

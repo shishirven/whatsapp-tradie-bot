@@ -84,6 +84,10 @@ def canonical_facts(facts: dict, business: Business | None = None) -> dict:
     for key in ("description", "preferred_time", "contact_name"):
         text = merged.get(key)
         merged[key] = str(text).strip() if text else None
+    name = merged.get("contact_name")
+    if name and name == name.lower():
+        # "robbie williams" -> "Robbie Williams"; a name typed with capitals is left alone.
+        merged["contact_name"] = " ".join(part[:1].upper() + part[1:] for part in name.split())
     return merged
 
 
@@ -139,10 +143,12 @@ def score_lead(facts: dict, business: Business | None = None) -> Score:
             "hot",
             "Job type, in-area suburb, urgency, description, and name are on file.",
         )
-    return Score(
-        "warm",
-        "Job type is known; suburb, urgency, description, or name is still missing.",
-    )
+    missing = [
+        label
+        for label, value in (("suburb", in_area), ("urgency", urgency), ("description", description), ("name", name))
+        if not value
+    ]
+    return Score("warm", f"Job type is known; still missing: {', '.join(missing)}.")
 
 
 def handoff_decision(score: Score, asked_for_human: bool) -> tuple[bool, str | None]:
