@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 
 from app.business import Business
+from app.hazards import smoke_alarm_sounding, without_alarm_devices
 
 _VISIT = re.compile(
     r"can someone come|come tomorrow|next available|book me in|book a visit",
@@ -413,9 +414,13 @@ def _shock(lowered: str) -> bool:
 
 
 def _burning(lowered: str) -> bool:
-    if any(phrase in lowered for phrase in ("burning", "smoke", "flame")):
+    if smoke_alarm_sounding(lowered):
         return True
-    return _word(lowered, r"\bsparks?\b")
+    # "smoke alarm beeping" is a battery job, not smoke.
+    text = without_alarm_devices(lowered)
+    if any(phrase in text for phrase in ("burning", "smoke", "flame")):
+        return True
+    return _word(text, r"\bsparks?\b")
 
 
 def _safety_reply(text: str, business: Business) -> str | None:

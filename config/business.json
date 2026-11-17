@@ -64,7 +64,7 @@
     {
       "id": "smoke_alarm",
       "label": "Smoke alarm",
-      "aliases": ["smoke alarm", "smoke alarms", "smoke detector"],
+      "aliases": ["smoke alarm", "smoke alarms", "smoke detector", "smoke detectors"],
       "quote": {
         "min_aud": 150,
         "max_aud": 380,

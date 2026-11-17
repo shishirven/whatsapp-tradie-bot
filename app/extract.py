@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from app.business import Business, load_business
+from app.hazards import smoke_alarm_sounding, without_alarm_devices
 
 _NAME = re.compile(
     r"\b(?:my name is|i am|i'm|this is)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)",
@@ -188,7 +189,10 @@ def extract_facts(text: str, business: Business | None = None) -> dict:
 
 
 def _urgency_label(lowered: str) -> str | None:
-    if any(phrase in lowered for phrase in _EMERGENCY):
+    # "smoke" in "smoke alarm" is the device, not a fire.
+    if smoke_alarm_sounding(lowered) or any(
+        phrase in without_alarm_devices(lowered) for phrase in _EMERGENCY
+    ):
         return "emergency"
     if any(phrase in lowered for phrase in _PLANNED):
         return "planned"
