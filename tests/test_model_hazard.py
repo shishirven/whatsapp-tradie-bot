@@ -57,7 +57,7 @@ def test_hazard_is_a_required_enum_in_the_tool_schema():
     assert "hazard" in schema["required"]
     assert schema["properties"]["hazard"]["enum"] == list(MODEL_HAZARDS)
     assert set(MODEL_HAZARDS) == {
-        "none", "wire", "powerline", "shock", "person_down", "fire",
+        "none", "wire", "powerline", "shock", "person_down", "fire", "alarm",
         "water", "overheating", "battery", "street_outage",
     }
 
