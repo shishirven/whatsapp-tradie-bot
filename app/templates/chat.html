@@ -10,18 +10,18 @@
       <span>Profile name <em>optional</em></span>
       <input id="profile-name" maxlength="80" placeholder="Alex" autocomplete="off">
     </label>
-    <div class="ad-list">
+    <div class="source-list">
       {% for ad in ads %}
-      <button type="button" class="ad-card" data-ad-id="{{ ad.ad_id }}">
-        <span class="ad-source">{{ ad.source }} · sample ad</span>
+      <button type="button" class="source-card" data-source-id="{{ ad.ad_id }}">
+        <span class="source-channel">{{ ad.source }} · sample ad</span>
         <strong>{{ ad.headline }}</strong>
-        <span class="ad-campaign">{{ ad.campaign }}</span>
+        <span class="source-campaign">{{ ad.campaign }}</span>
       </button>
       {% endfor %}
-      <button type="button" class="ad-card ad-card-plain" data-ad-id="">
-        <span class="ad-source">No ad</span>
+      <button type="button" class="source-card source-card-plain" data-source-id="">
+        <span class="source-channel">No ad</span>
         <strong>Start an organic chat</strong>
-        <span class="ad-campaign">Someone who already has the number</span>
+        <span class="source-campaign">Someone who already has the number</span>
       </button>
     </div>
     <p class="banner">{{ banner }}</p>
