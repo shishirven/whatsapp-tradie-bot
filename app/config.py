@@ -36,6 +36,13 @@ class Settings:
     staff_password: str = ""
     staff_session_secret: str = ""
     business_config_path: str = ""
+    # The owner's own WhatsApp number for alerts, e.g. +61412345678. Empty: alerts are log lines only.
+    owner_whatsapp: str = ""
+    # Approved utility template for owner alerts (see README). Empty: free text, 24-hour window only.
+    owner_alert_template: str = ""
+    owner_alert_language: str = "en"
+    # Public URL of this app, used for the staff-desk link in alerts.
+    public_base_url: str = ""
     gemini_api_key: str = ""
     gemini_model: str = _DEFAULT_GEMINI_MODEL
     gemini_fallback_models: str = ""
@@ -98,6 +105,10 @@ class Settings:
             staff_password=_env("STAFF_PASSWORD"),
             staff_session_secret=_env("STAFF_SESSION_SECRET"),
             business_config_path=_env("BUSINESS_CONFIG"),
+            owner_whatsapp=_env("OWNER_WHATSAPP"),
+            owner_alert_template=_env("OWNER_ALERT_TEMPLATE"),
+            owner_alert_language=_env("OWNER_ALERT_LANGUAGE") or "en",
+            public_base_url=_env("PUBLIC_BASE_URL"),
             gemini_api_key=gemini_key,
             gemini_model=os.getenv("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL).strip()
             or _DEFAULT_GEMINI_MODEL,

@@ -587,11 +587,15 @@ def _handle_incoming(
     )
     if handoff and conversation["status"] != "handed_off":
         db.set_status(conversation["id"], "handed_off")
-        _notify(notifier, saved, conversation, score.label, handoff_reason, facts)
+        _notify(
+            notifier, saved, conversation, score.label, handoff_reason, facts,
+            business=business, message=text, decision=decision,
+        )
     elif decision.escalated:
         _notify(
             notifier, saved, conversation, score.label,
             decision.escalation_reason or "escalated", facts,
+            business=business, message=text, decision=decision,
         )
 
     record_turn(
@@ -1347,7 +1351,11 @@ def _event_description(lead: dict, conversation: dict) -> str:
     return "\n".join(parts)
 
 
-def _notify(notifier, saved, conversation, score_label, handoff_reason, facts) -> None:
+def _notify(
+    notifier, saved, conversation, score_label, handoff_reason, facts,
+    *, business: Business | None = None, message: str | None = None, decision=None,
+) -> None:
+    hazard = getattr(decision, "hazard", None) if decision is not None else None
     summary = {
         "lead_id": saved["id"],
         "conversation_id": conversation["id"],
@@ -1355,8 +1363,13 @@ def _notify(notifier, saved, conversation, score_label, handoff_reason, facts) -
         "score": score_label,
         "reason": handoff_reason,
         "job_type": facts.get("job_type"),
+        "job_label": business.job_label(facts.get("job_type")) if business and facts.get("job_type") else None,
         "suburb": facts.get("suburb"),
+        "urgency": facts.get("urgency"),
         "contact_name": facts.get("contact_name"),
+        # A real hazard (not a whole-street outage) leads the owner's alert.
+        "hazard": hazard.kind if hazard is not None and getattr(decision, "is_hazard", False) else None,
+        "message": message,
     }
     try:
         notifier.handoff(summary)
