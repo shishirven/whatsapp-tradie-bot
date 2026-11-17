@@ -182,6 +182,19 @@ The health check is `GET /api/health`. A 1 GB disk is mounted at `/data` for SQL
 4. Deploy. The service URL is `https://<service>.onrender.com`.
 5. In Meta, set the callback URL to `https://<service>.onrender.com/webhook`.
 
+### Live app
+
+The deployed service is https://whatsapp-tradie-bot.onrender.com (if Render added a suffix to the name, the exact URL is at the top of the service page in the dashboard).
+
+| Page | URL |
+| --- | --- |
+| Chat simulator | https://whatsapp-tradie-bot.onrender.com/ |
+| Staff desk (sign in with `STAFF_USERNAME` / `STAFF_PASSWORD`) | https://whatsapp-tradie-bot.onrender.com/staff |
+| Health check | https://whatsapp-tradie-bot.onrender.com/api/health |
+| Meta webhook callback | https://whatsapp-tradie-bot.onrender.com/webhook |
+
+Gemini on Render: `GEMINI_MODEL=gemini-3.5-flash-lite` and `GEMINI_FALLBACK_MODELS=gemini-3.1-flash-lite`. Both are in `render.yaml`; set them under the service's **Environment** tab if the service was not created from the Blueprint.
+
 `MESSAGING_PROVIDER` is `whatsapp` and `LLM_PROVIDER` is `gemini` in the blueprint. Until `WHATSAPP_TOKEN` and `PHONE_NUMBER_ID` are set, outbound sends are skipped and logged; inbound messages are still stored. Until `GEMINI_API_KEY` is set, the reply says that key is empty.
 
 ## Environment variables
