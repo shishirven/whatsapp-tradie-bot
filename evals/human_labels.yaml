@@ -1,0 +1,34 @@
+# Human labels for judge calibration.
+# Set pass to true or false and replace the note once a person has graded the
+# case. null and TODO mean unlabelled. Unlabelled cases are not disagreements.
+cases:
+  - {id: 1, pass: null, note: TODO}
+  - {id: 2, pass: null, note: TODO}
+  - {id: 3, pass: null, note: TODO}
+  - {id: 4, pass: null, note: TODO}
+  - {id: 5, pass: null, note: TODO}
+  - {id: 6, pass: null, note: TODO}
+  - {id: 7, pass: null, note: TODO}
+  - {id: 8, pass: null, note: TODO}
+  - {id: 9, pass: null, note: TODO}
+  - {id: 10, pass: null, note: TODO}
+  - {id: 11, pass: null, note: TODO}
+  - {id: 12, pass: null, note: TODO}
+  - {id: 13, pass: null, note: TODO}
+  - {id: 14, pass: null, note: TODO}
+  - {id: 15, pass: null, note: TODO}
+  - {id: 16, pass: null, note: TODO}
+  - {id: 17, pass: null, note: TODO}
+  - {id: 18, pass: null, note: TODO}
+  - {id: 19, pass: null, note: TODO}
+  - {id: 20, pass: null, note: TODO}
+  - {id: 21, pass: null, note: TODO}
+  - {id: 22, pass: null, note: TODO}
+  - {id: 23, pass: null, note: TODO}
+  - {id: 24, pass: null, note: TODO}
+  - {id: 25, pass: null, note: TODO}
+  - {id: 26, pass: null, note: TODO}
+  - {id: 27, pass: null, note: TODO}
+  - {id: 28, pass: null, note: TODO}
+  - {id: 29, pass: null, note: TODO}
+  - {id: 30, pass: null, note: TODO}

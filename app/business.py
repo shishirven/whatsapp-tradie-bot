@@ -60,6 +60,14 @@ class Business:
     job_types: tuple[JobType, ...]
     ads: tuple[Ad, ...]
     source_tags: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    owner_name: str | None = None
+    licence_no: str | None = None
+    callout_fee: str | None = None
+    callout_inclusions: str | None = None
+    after_hours_rate: str | None = None
+    quote_timeframe: str | None = None
+    callback_timeframe: str | None = None
+    gst_included: bool = True
 
     def zone(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
@@ -111,6 +119,15 @@ class Business:
         folded = text.casefold()
         return any(known.casefold() == folded for known in self.suburbs)
 
+    def owner_label(self) -> str:
+        return self.owner_name or "the owner"
+
+    def price_range_text(self, job_type: str | None) -> str | None:
+        band = self.quote_for(job_type)
+        if band is None:
+            return None
+        return f"${band.min_aud}–${band.max_aud}"
+
     def find_ad(self, ad_id: str | None) -> Ad | None:
         if not ad_id:
             return None
@@ -124,7 +141,7 @@ class Business:
         lines = [
             f"Business: {self.name}, trade: {self.trade}.",
             f"Service area ({self.area_name}): {', '.join(self.suburbs)}.",
-            "Do not mention prices, dollar amounts, or quote ranges.",
+            "Do not mention prices except as an indicative range from the price book. Never invent a figure.",
             "Job types:",
         ]
         for job in self.job_types:
@@ -198,6 +215,14 @@ def parse_business(data: dict) -> Business:
         job_types=job_types,
         ads=ads,
         source_tags=_parse_source_tags(data),
+        owner_name=_optional_text(data, "owner_name"),
+        licence_no=_optional_text(data, "licence_no"),
+        callout_fee=_optional_text(data, "callout_fee"),
+        callout_inclusions=_optional_text(data, "callout_inclusions"),
+        after_hours_rate=_optional_text(data, "after_hours_rate"),
+        quote_timeframe=_optional_text(data, "quote_timeframe"),
+        callback_timeframe=_optional_text(data, "callback_timeframe"),
+        gst_included=_gst_included(data),
     )
 
 
@@ -304,6 +329,19 @@ def _required_list(data: dict, key: str) -> list:
     if not isinstance(value, list):
         raise ValueError(f"Business config is missing {key}")
     return value
+
+
+def _optional_text(data: dict, key: str) -> str | None:
+    if key not in data:
+        return None
+    return _text(data.get(key))
+
+
+def _gst_included(data: dict) -> bool:
+    """Prices include GST unless the config explicitly says otherwise."""
+    if "gst_included" not in data or data.get("gst_included") is None:
+        return True
+    return bool(data.get("gst_included"))
 
 
 def _text(value: object) -> str | None:

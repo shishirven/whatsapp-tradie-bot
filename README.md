@@ -127,6 +127,40 @@ Tests do not call Anthropic, Gemini, OpenAI, Meta, or Google. They pass fakes:
 pytest
 ```
 
+## Evals
+
+Golden conversations live in `evals/golden_set.yaml` (30 cases). Placeholders such as `{owner_name}`, `{price_range}`, `{callout_fee}`, and `{slot}` are filled from `evals/fixtures/test_business.json` and from the calendar when the run starts. That file is a fake business: the name, licence, fees, and price bands are examples, not a live tariff. Client records used by the returning-customer cases are in `evals/fixtures/clients.json`. If a configured value is missing, the bot says it will confirm it and does not invent a figure.
+
+Offline, deterministic checks only (no API key, mock qualifier):
+
+```bash
+python -m evals.run --offline
+```
+
+With `GEMINI_API_KEY` set, the same command sends each case through the real Gemini qualifier and then grades the reply with a separate judge. `GEMINI_MODEL` is the reply model (`gemini-3.8-flash` by default). `JUDGE_MODEL` is the judge and defaults to `gemini-3.8-pro`, which is the stronger model. Hard-rule checks (000, the price book, DIY steps, refunds and fault, fabricated config, stored client details, the escalation flag) are code. They do not call the judge.
+
+```bash
+python -m evals.run
+python -m evals.run --repeats 3
+```
+
+`--repeats N` runs every case N times. A case whose overall verdict, deterministic verdict, or judge verdict is not the same on every repeat is marked unstable.
+
+Reports are written to `evals/results/` as JSON and Markdown. That directory is gitignored.
+
+Human calibration labels live in `evals/human_labels.yaml`. Each case starts as `pass: null` and `note: TODO`.
+
+```bash
+python -m evals.calibrate
+python -m evals.calibrate --results evals/results/latest.json
+```
+
+That prints the agreement percentage and every labelled case where the human and the judge disagree. Unlabelled cases are skipped.
+
+To add a case, append it to `evals/golden_set.yaml` with an id, category, customer message, reference reply, and rule. Add any setup (photo, returning client, unknown number) under `setup`. Add a TODO row to `evals/human_labels.yaml`. Register the case's deterministic checks in `CASE_CHECKS` inside `evals/checks.py`.
+
+Pytest runs the offline harness, so CI does not need an API key.
+
 ### Docker
 
 ```bash
