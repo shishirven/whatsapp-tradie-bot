@@ -286,3 +286,12 @@ def test_tracing_stays_off_without_an_endpoint(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.setattr(telemetry, "_configured", False)
     assert telemetry.setup_tracing() is False
+
+
+def test_handoff_log_line_masks_the_phone_number(caplog):
+    from app.notify import LogNotifier
+
+    with caplog.at_level(logging.INFO, logger="tradie.handoff"):
+        LogNotifier().handoff({"lead_id": 7, "wa_id": "61412345678", "reason": "danger"})
+    assert "61412345678" not in caplog.text
+    assert "wa_id=***678" in caplog.text
