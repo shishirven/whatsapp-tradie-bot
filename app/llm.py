@@ -20,6 +20,7 @@ import anthropic
 
 from app.business import Business, load_business
 from app.extract import extract_facts
+from app.hazards import MODEL_HAZARDS, classify_hazard, hazard_from_kind
 from app.intake import apply_intake, normalise_intake
 from app.scoring import canonical_facts, merge_facts, wants_human
 
@@ -65,6 +66,24 @@ QUALIFY_TOOL = {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
                 "description": "emergency, urgent, planned, or null.",
             },
+            "hazard": {
+                "type": "string",
+                "enum": list(MODEL_HAZARDS),
+                "description": (
+                    "Electrical danger in the customer's latest message. "
+                    "wire: a fallen, hanging, exposed, cut or damaged wire or cable, or a tree on one. "
+                    "powerline: street powerlines, a power pole, or the service line from the pole. "
+                    "shock: a shock or tingle from a tap, appliance or fitting. "
+                    "person_down: someone stuck to, or collapsed after touching, something electrical. "
+                    "fire: smoke, flames, sparks, burning smell, or a smoke alarm going off for a fire. "
+                    "water: water, a leak or flooding near the switchboard, lights, power points or wiring. "
+                    "overheating: melting, scorch marks, a hot, buzzing or crackling fitting, a frayed lead. "
+                    "battery: a swollen, hissing, leaking or very hot home battery or inverter. "
+                    "street_outage: the whole street or area has no power. "
+                    "none: anything else, including a beeping smoke alarm, new wiring work, or a price question. "
+                    "When unsure between none and a hazard, choose the hazard."
+                ),
+            },
             "description": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
                 "description": (
@@ -87,6 +106,7 @@ QUALIFY_TOOL = {
             "job_type",
             "suburb",
             "urgency",
+            "hazard",
             "description",
             "preferred_time",
             "contact_name",
@@ -111,6 +131,7 @@ class QualificationDraft:
     description: str | None = None
     preferred_time: str | None = None
     contact_name: str | None = None
+    hazard: str | None = None
     raw: dict | None = None
     intake: dict | None = None
     intake_prompt: str | None = None
@@ -252,6 +273,7 @@ class RuleBasedQualifier:
                 description=extracted["description"],
                 preferred_time=extracted["preferred_time"],
                 contact_name=extracted["contact_name"],
+                hazard=_rule_hazard(latest),
                 raw=raw,
                 intake=normalise_intake(turn.intake),
             )
@@ -287,10 +309,16 @@ class RuleBasedQualifier:
             description=combined.get("description"),
             preferred_time=combined.get("preferred_time"),
             contact_name=combined.get("contact_name"),
+            hazard=_rule_hazard(latest),
             raw=raw,
             intake=outcome.intake,
             intake_prompt=outcome.prompt,
         )
+
+
+def _rule_hazard(text: str) -> str | None:
+    hazard = classify_hazard(text)
+    return hazard.kind if hazard else None
 
 
 class MissingKeyQualifier:
@@ -403,8 +431,15 @@ def _draft_from_tool(data: dict, texts: list[str]) -> QualificationDraft:
         description=_clean_str(data.get("description")),
         preferred_time=_clean_str(data.get("preferred_time")),
         contact_name=_clean_str(data.get("contact_name")),
+        hazard=_clean_hazard(data.get("hazard")),
         raw=data,
     )
+
+
+def _clean_hazard(value) -> str | None:
+    """A known hazard kind, or None for "none", null, or a name we do not know."""
+    hazard = hazard_from_kind(value if isinstance(value, str) else None)
+    return hazard.kind if hazard else None
 
 
 def _compose_reply(
@@ -524,6 +559,8 @@ def _gemini_tool():
             schema["type"] = "boolean"
         elif spec.get("type") == "string":
             schema["type"] = "string"
+            if spec.get("enum"):
+                schema["enum"] = list(spec["enum"])
         else:
             schema["type"] = "string"
             schema["nullable"] = True

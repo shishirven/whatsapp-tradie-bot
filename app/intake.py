@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from app.business import Business, load_business
 from app.extract import extract_facts, extract_job_type, extract_name, extract_preferred_time, extract_suburb, extract_urgency
 from app.scoring import merge_facts
+from app.hazards import is_hazard
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
@@ -487,6 +488,8 @@ def issue_core(text: str) -> str | None:
 
 
 def looks_like_problem(text: str, business: Business | None = None) -> bool:
+    if is_hazard(text):
+        return True
     if issue_core(text):
         return True
     lowered = (text or "").casefold()

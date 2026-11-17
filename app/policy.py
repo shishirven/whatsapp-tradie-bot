@@ -12,10 +12,14 @@ does not contain a made-up figure.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 from app.business import Business
+from app.hazards import EMERGENCY, REDIRECT, URGENT, Hazard, classify_hazard, hazard_from_kind
+
+logger = logging.getLogger("tradie.policy")
 
 _VISIT = re.compile(
     r"can someone come|come tomorrow|next available|book me in|book a visit",
@@ -54,16 +58,52 @@ class PolicyDecision:
     escalated: bool = False
     escalation_reason: str | None = None
     stop_intake: bool = False
+    hazard: Hazard | None = None
+
+    @property
+    def is_hazard(self) -> bool:
+        """A real hazard (emergency or urgent), from the rules or the model."""
+        return self.hazard is not None and self.hazard.tier != REDIRECT
 
 
 def asks_for_visit(text: str) -> bool:
     return bool(_VISIT.search(text or ""))
 
 
-def is_safety_message(text: str) -> bool:
+def is_safety_message(text: str, model_hazard: str | None = None) -> bool:
     """True for a real hazard. A whole-street outage and the word "sparky" are not."""
-    lowered = (text or "").casefold()
-    return bool(_life_support(lowered) or _powerline(lowered) or _shock(lowered) or _burning(lowered))
+    hazard = resolve_hazard(text, model_hazard, log=False)
+    return hazard is not None and hazard.tier != REDIRECT
+
+
+def resolve_hazard(text: str | None, model_hazard: str | None = None, *, log: bool = True) -> Hazard | None:
+    """Keyword rules and the model's `hazard` field. Either can raise a hazard; the model cannot lower one.
+
+    The rules win when both found something, because their wording is fixed and tested.
+    The model only picks which vetted script to use. It never writes the safety advice.
+    """
+    rule = classify_hazard(text)
+    model = hazard_from_kind(model_hazard)
+    if log and (rule.kind if rule else None) != (model.kind if model else None):
+        # Each disagreement is a missed phrasing for one side. Review these to grow the rules.
+        logger.info(
+            "hazard disagreement rules=%s model=%s text=%r",
+            rule.kind if rule else "none",
+            model.kind if model else "none",
+            (text or "")[:200],
+        )
+    return rule or model
+
+
+def hazard_urgency(current: str | None, hazard: Hazard | None) -> str | None:
+    """Raise urgency to match a hazard. Never lowers it."""
+    if hazard is None:
+        return current
+    if hazard.tier == EMERGENCY:
+        return "emergency"
+    if hazard.tier == URGENT and current != "emergency":
+        return "urgent"
+    return current
 
 
 def is_repeat_fault(text: str) -> bool:
@@ -81,13 +121,17 @@ def is_repeat_fault(text: str) -> bool:
     ) is not None
 
 
-def apply_policy(text: str, business: Business) -> PolicyDecision:
-    """Decide the guardrail for one customer message. `text` is their words."""
+def apply_policy(text: str, business: Business, model_hazard: str | None = None) -> PolicyDecision:
+    """Decide the guardrail for one customer message. `text` is their words.
+
+    `model_hazard` is the qualifier's `hazard` field for this turn, if any.
+    """
     lowered = (text or "").casefold()
     replacement = None
     offer_visit = False
     stop_intake = False
-    safety = _safety_reply(text or "", business)
+    hazard = resolve_hazard(text, model_hazard)
+    safety = _safety_reply(hazard, business)
     if safety:
         replacement = safety
     elif _is_injection(lowered):
@@ -137,16 +181,17 @@ def apply_policy(text: str, business: Business) -> PolicyDecision:
             replacement = area
         elif _asks_identity(lowered):
             replacement = _identity_reply(business)
-    reason = _escalation_reason(lowered)
+    reason = "danger" if hazard is not None and hazard.tier != REDIRECT else _escalation_reason(lowered)
     if stop_intake and reason is None:
         reason = "abusive"
     return PolicyDecision(
         replacement=replacement,
-        ensure_000=bool(safety) and "000" in safety,
+        ensure_000=hazard is not None and hazard.tier == EMERGENCY,
         offer_visit=offer_visit,
         escalated=reason is not None,
         escalation_reason=reason,
         stop_intake=stop_intake,
+        hazard=hazard,
     )
 
 
@@ -391,64 +436,67 @@ def _asks_identity(lowered: str) -> bool:
     )
 
 
-def _word(lowered: str, pattern: str) -> bool:
-    return re.search(pattern, lowered) is not None
-
-
-def _life_support(lowered: str) -> bool:
-    return any(phrase in lowered for phrase in ("oxygen", "life-support", "life support"))
-
-
-def _powerline(lowered: str) -> bool:
-    return any(phrase in lowered for phrase in ("powerline", "power line", "downed line", "line is down"))
-
-
-def _street_outage(lowered: str) -> bool:
-    street = any(phrase in lowered for phrase in ("whole street", "our street", "the street", "in the street"))
-    return street and any(phrase in lowered for phrase in ("power", "outage", "blackout"))
-
-
-def _shock(lowered: str) -> bool:
-    return _word(lowered, r"\bshocks?\b")
-
-
-def _burning(lowered: str) -> bool:
-    if any(phrase in lowered for phrase in ("burning", "smoke", "flame")):
-        return True
-    return _word(lowered, r"\bsparks?\b")
-
-
-def _safety_reply(text: str, business: Business) -> str | None:
-    lowered = text.casefold()
+def _safety_reply(hazard: Hazard | None, business: Business) -> str | None:
+    if hazard is None:
+        return None
     owner = business.owner_label()
-    if _life_support(lowered):
-        return (
+    replies = {
+        "life_support": (
             "If she's at any risk, call 000 now. Also call your energy retailer and tell them "
             f"it's a life-support household. I'm marking this urgent for {owner}. Address please?"
-        )
-    if _powerline(lowered):
-        return (
+        ),
+        "person_down": (
+            "Call 000 now. Don't touch them if they could still be touching the power. "
+            "Switch off at the main switch if you can, or move the power source away with something "
+            "dry and not metal, like a wooden broom handle. Once they're clear, follow the 000 "
+            f"operator's first-aid steps. I'm alerting {owner} right now. What's your address?"
+        ),
+        "powerline": (
             "Stay at least 8 metres away and call 000, then your electricity distributor's fault line. "
             "We can't work on network lines, but we can help with any damage on your property once it's made safe."
-        )
-    if _street_outage(lowered):
-        return (
+        ),
+        "street_outage": (
             "That sounds like a network outage, which your distributor handles. "
             "Their fault number is on your power bill. If only your home is out, tell me and I'll book someone."
-        )
-    if _shock(lowered):
-        return (
+        ),
+        "wire": (
+            "Treat that wire as live. Keep everyone, including kids and pets, at least 8 metres away, "
+            "don't touch it or anything it's touching, and call 000 now. If the wire is on the street "
+            "side or runs from the pole, also call your electricity distributor's fault line (the number "
+            "is on your power bill). If it's on your property, we'll come and fix it once it's safe. "
+            f"I'm alerting {owner} right now. What's your address?"
+        ),
+        "shock": (
             "Please don't touch any taps or appliances. If anyone feels unwell, call 000. "
             f"This can be a serious fault, so I'm flagging it as urgent with {owner}. "
             "What's your address and best number?"
-        )
-    if _burning(lowered):
-        return (
+        ),
+        "fire": (
             "That needs urgent attention. If you see smoke, flames or sparks, call 000 now. "
             "If it's safe, turn off the main switch and keep clear of the board. "
             f"I'm alerting {owner} right now. What's your address?"
-        )
-    return None
+        ),
+        "battery": (
+            "Please keep everyone away from it and don't move or open it. If it smokes, hisses or "
+            "catches fire, get everyone out, close the door behind you and call 000, because the fumes "
+            "are toxic. If it's safe, switch the system off at its isolator. "
+            f"I'm flagging this as urgent with {owner}. What's your address?"
+        ),
+        "water": (
+            "Please don't touch the switchboard or anything wet that's plugged in. If you can reach the "
+            "main switch with dry hands and you're not standing in water, turn it off. If the board "
+            "itself is wet, keep away. If anyone gets a shock or you see smoke or sparks, call 000. "
+            "Don't turn the power back on until it's been checked. "
+            f"I'm flagging this as urgent with {owner}. What's your address?"
+        ),
+        "overheating": (
+            "Please stop using it. If it's safe, switch that circuit off at the switchboard. "
+            "Melting, scorch marks, buzzing or a hot fitting mean it's overheating, so we'll treat it "
+            "as urgent. If you see smoke or flames, call 000. "
+            f"I'm flagging this with {owner}. What's your address?"
+        ),
+    }
+    return replies.get(hazard.kind)
 
 
 def _complaint_reply(text: str, business: Business) -> str | None:
@@ -543,17 +591,11 @@ def _photo_reply(text: str, business: Business) -> str | None:
     )
 
 
-def _is_danger(lowered: str) -> bool:
-    return bool(_life_support(lowered) or _powerline(lowered) or _shock(lowered) or _burning(lowered))
-
-
 def _is_abuse(lowered: str) -> bool:
     return any(phrase in lowered for phrase in _ABUSE)
 
 
 def _escalation_reason(lowered: str) -> str | None:
-    if _is_danger(lowered):
-        return "danger"
     if _asks_discount(lowered):
         return "pricing"
     if any(phrase in lowered for phrase in _COMPLAINTS):

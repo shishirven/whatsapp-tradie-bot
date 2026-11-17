@@ -47,7 +47,7 @@ from app.media import (
 )
 from app.messaging import DeliveryError, Inbound, MessagingGateway
 from app.notify import StaffNotifier
-from app.policy import apply_policy, asks_for_visit, guardrail_block, is_repeat_fault, is_safety_message
+from app.policy import apply_policy, asks_for_visit, guardrail_block, hazard_urgency, is_repeat_fault, resolve_hazard
 from app.quotes import customer_quote_text, draft_quote, scrub_prices
 from app.routing import (
     KeywordIntentClassifier,
@@ -464,6 +464,10 @@ def handle_incoming(
         intake_before=intake_before,
         skip=bool(booked_reply) or wants_human(text) or bool(draft.request_human),
     )
+    # A hazard from the rules or the model's `hazard` field raises urgency before scoring.
+    urgency = hazard_urgency(facts.get("urgency"), resolve_hazard(text, draft.hazard, log=False))
+    if urgency != facts.get("urgency"):
+        facts = {**facts, "urgency": urgency}
     score = score_lead(facts, business)
     asked = bool(draft.request_human) or wants_human(text)
     handoff, handoff_reason = handoff_decision(score, asked)
@@ -488,12 +492,12 @@ def handle_incoming(
     if handoff:
         reply = with_handoff_line(reply, business)
     reply = scrub_prices(_with_opening(opening, reply)) or _APOLOGY
-    decision = apply_policy(text or "", business)
+    decision = apply_policy(text or "", business, model_hazard=draft.hazard)
     if decision.replacement:
         # Configured amounts are allowed through. The scrubber above already
         # removed any figure the model invented on its own.
         reply = _with_opening(opening, decision.replacement)
-    if decision.ensure_000 and "000" not in reply and is_safety_message(text or ""):
+    if decision.ensure_000 and "000" not in reply and decision.is_hazard:
         reply = f"Call 000 now. {reply}".strip()
     reply = _name_earliest_slot(
         reply, text or "", business, calendar, moment, offer_visit=decision.offer_visit
@@ -511,7 +515,7 @@ def handle_incoming(
     if decision.stop_intake:
         handoff = True
         handoff_reason = "abusive"
-    if not is_safety_message(text or ""):
+    if not decision.is_hazard:
         reply = _strip_false_emergency(reply)
     reply = _tidy_reply(reply)
 
