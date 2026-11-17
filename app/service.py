@@ -1043,8 +1043,12 @@ def _strip_false_emergency(reply: str) -> str:
 
 
 def _tidy_reply(reply: str) -> str:
-    """Drop a null preference and a greeting sentence that was added twice."""
+    """Drop a null preference and a greeting sentence that was added twice.
+
+    With no owner name configured, replies say "the owner"; capitalise it when it starts a sentence.
+    """
     text = re.sub(r"(?i)\byou mentioned (?:null|none|undefined)\b\.?\s*", "", reply or "")
+    text = re.sub(r"(^|[.!?]\s+)the owner\b", lambda m: f"{m.group(1)}The owner", text)
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     seen: set[str] = set()
     kept: list[str] = []

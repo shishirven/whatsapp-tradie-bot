@@ -554,8 +554,7 @@ def _compose_reply(
 
     new_job = extracted.get("job_type")
     if new_job and new_job != known.get("job_type"):
-        label = business.job_label(new_job) or _label(new_job)
-        parts.append(f"{label} — I'll put that on the job.")
+        parts.append(_job_acknowledgement(new_job, business))
     elif ad and not merged.get("job_type") and first_user_turn:
         headline = ad.get("headline") or "the ad you tapped"
         parts.append(f'I can help with "{headline}", or with something else.')
@@ -596,6 +595,14 @@ def _checklist_complete(facts: dict, business: Business) -> bool:
         and facts.get("description")
         and facts.get("contact_name")
     )
+
+
+def _job_acknowledgement(job_type: str, business: Business) -> str:
+    """Name a configured job; never read the customer's own sentence back as a job name."""
+    found = business.job(job_type)
+    if found:
+        return f"{found.label} — I'll put that on the job."
+    return "Got it, I'll put that on the job."
 
 
 def _label(value: str) -> str:
