@@ -13,6 +13,8 @@ Writing a record never breaks a reply: any error is logged and swallowed.
 
     python -m app.llm_log summary            # counts, fallback rate, latency, tokens, disagreements
     python -m app.llm_log export calls.jsonl # one JSON object per turn, for eval cases
+    python -m app.llm_log s3-check           # write, read back and delete a test file in LOG_BUCKET
+    python -m app.llm_log ship               # upload every row not yet in LOG_BUCKET, now
 """
 
 from __future__ import annotations
@@ -211,9 +213,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("summary", help="Print counts, fallback rate, latency, tokens, disagreements")
     export = sub.add_parser("export", help="Write one JSON object per turn")
     export.add_argument("out", help="Output .jsonl path, or - for stdout")
+    for name, help_text in (
+        ("s3-check", "Check the S3 bucket can be written to, read and cleaned up"),
+        ("ship", "Upload every llm_calls row not yet in the S3 bucket"),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("--bucket", help="S3 bucket (default: LOG_BUCKET)")
     args = parser.parse_args(argv)
 
-    path = args.db or Settings.from_env().sqlite_path
+    settings = Settings.from_env()
+    path = args.db or settings.sqlite_path
+    if args.command in ("s3-check", "ship"):
+        return _s3_command(args, Database(path), args.bucket or settings.log_bucket)
     calls = Database(path).list_llm_calls(since=args.since)
     if args.command == "summary":
         print(json.dumps(summarise(calls), indent=2))
@@ -228,6 +239,29 @@ def main(argv: list[str] | None = None) -> int:
             handle.close()
     if args.out != "-":
         print(f"Wrote {len(rows)} turns to {args.out}")
+    return 0
+
+
+def _s3_command(args, db, bucket: str, client=None) -> int:
+    from app.log_shipper import check_access, s3_client, ship_all
+
+    if not bucket:
+        print("No bucket: set LOG_BUCKET or pass --bucket.", file=sys.stderr)
+        return 2
+    try:
+        client = client or s3_client()
+        if args.command == "s3-check":
+            key = check_access(client, bucket)
+            print(f"OK: wrote, read back and deleted s3://{bucket}/{key}")
+            return 0
+        shipped = ship_all(db, client, bucket)
+    except Exception as exc:
+        print(f"FAILED: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}", file=sys.stderr)
+        return 1
+    if not shipped:
+        print(f"Nothing new to upload (s3://{bucket} already has every row).")
+    for item in shipped:
+        print(f"Uploaded {item['rows']} rows to s3://{bucket}/{item['key']}")
     return 0
 
 
