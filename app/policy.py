@@ -67,6 +67,7 @@ class PolicyDecision:
     escalation_reason: str | None = None
     stop_intake: bool = False
     hazard: Hazard | None = None
+    rule: str | None = None  # which guardrail replaced the reply, e.g. "safety:wire", "price"
 
     @property
     def is_hazard(self) -> bool:
@@ -141,25 +142,30 @@ def apply_policy(text: str, business: Business, model_hazard: str | None = None)
     """
     lowered = (text or "").casefold()
     replacement = None
+    rule = None
     offer_visit = False
     stop_intake = False
     hazard = resolve_hazard(text, model_hazard)
     safety = _safety_reply(hazard, business)
     if safety:
         replacement = safety
+        rule = f"safety:{hazard.kind}"
     elif _asks_fire_brigade_or_us(lowered):
+        rule = "fire_brigade_or_us"
         replacement = (
             "Call the fire brigade on 000 if there's any smoke, burning smell, heat or flames, "
             "or if you're not sure. If there's no sign of fire and the alarm keeps going off, "
             "it's a faulty alarm and that's us: we'll test, clean or replace it. Which suburb are you in?"
         )
     elif _is_injection(lowered):
+        rule = "injection"
         replacement = (
             "I can't do that, but I'm happy to help with a quote or booking. "
             "What do you need done?"
         )
     elif _is_diy(lowered):
         if "bypass" in lowered:
+            rule = "diy_bypass"
             replacement = (
                 "I can't help bypass it. It's tripping to protect you. "
                 "You can unplug appliances and reset it once. If it trips again, "
@@ -167,38 +173,52 @@ def apply_policy(text: str, business: Business, model_hazard: str | None = None)
             )
             offer_visit = True
         else:
+            rule = "diy_wiring"
             replacement = _wire_reply(business)
     elif _is_abuse(lowered):
+        rule = "abuse"
         replacement = _abuse_reply(business)
         stop_intake = True
     elif (complaint := _complaint_reply(text or "", business)):
+        rule = "complaint"
         replacement = complaint
     elif _is_tenant(lowered):
+        rule = "tenant"
         replacement = (
             "Happy to help. Repairs usually need approval from your landlord or property manager. "
             "Has it been approved, and who should the invoice go to?"
         )
     elif _claims_prior_work(lowered):
+        rule = "prior_work"
         replacement = _match_reply(text or "")
     elif (photo := _photo_reply(text or "", business)):
+        rule = "photo"
         replacement = photo
     elif _asks_exact_price(lowered):
+        rule = "exact_price"
         replacement = _exact_price_reply(business)
     elif _asks_discount(lowered):
+        rule = "discount"
         replacement = _discount_reply(business)
     elif _asks_price(lowered):
+        rule = "price"
         replacement = _price_reply(lowered, business)
     elif _asks_callout(lowered):
+        rule = "callout"
         replacement = _callout_reply(business)
     elif _asks_gst(lowered):
+        rule = "gst"
         replacement = _gst_reply(business)
     elif _asks_licence(lowered):
+        rule = "licence"
         replacement = _licence_reply(business)
     else:
         area = _service_area_reply(text or "", business)
         if area:
+            rule = "service_area"
             replacement = area
         elif _asks_identity(lowered):
+            rule = "identity"
             replacement = _identity_reply(business)
     reason = "danger" if hazard is not None and hazard.tier != REDIRECT else _escalation_reason(lowered)
     if stop_intake and reason is None:
@@ -211,6 +231,7 @@ def apply_policy(text: str, business: Business, model_hazard: str | None = None)
         escalation_reason=reason,
         stop_intake=stop_intake,
         hazard=hazard,
+        rule=rule,
     )
 
 
