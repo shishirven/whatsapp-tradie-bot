@@ -538,7 +538,8 @@ def _handle_incoming(
         if facts.get("urgency") == "emergency" and "000" not in reply:
             reply = f"{_SAFETY} {reply}"
     elif booked_reply:
-        reply = f"{booked_reply} {reply}".strip()
+        # The booking line already confirms the time; keep only the model's next question.
+        reply = f"{booked_reply} {_questions_only(reply)}".strip()
     elif _should_offer(facts, booking, business, moment):
         slots = available_slots(business, calendar, moment) if calendar is not None else []
         if slots:
@@ -1044,6 +1045,12 @@ def _prompt_version(business: Business) -> str:
 def _strip_false_emergency(reply: str) -> str:
     """Drop a leading 'Call 000 now' that was added to a message that is not a hazard."""
     return re.sub(r"(?i)^call 000 now\.?\s*", "", reply or "").strip()
+
+
+def _questions_only(reply: str) -> str:
+    """The question sentences of a reply, so a restated booking time is not said twice."""
+    sentences = re.split(r"(?<=[.!?])\s+", (reply or "").strip())
+    return " ".join(sentence for sentence in sentences if sentence.endswith("?"))
 
 
 def _tidy_reply(reply: str) -> str:
