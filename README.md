@@ -172,6 +172,49 @@ docker run --rm --name whatsapp-tradie-bot -p 8000:8000 --env-file .env -v whats
 
 The image stores SQLite at `/data/tradie.db`. Leave `SQLITE_PATH` commented out in `.env` so that path is not overridden. The process listens on `PORT` (8000 if unset).
 
+## Owner alerts
+
+When a customer reports a hazard, complains, asks for a person, or becomes a hot lead, the bot sends an alert to the owner's own WhatsApp:
+
+```
+URGENT SAFETY: possible live wire
+Job: #12, Fault finding and power loss, Newtown, emergency
+Customer: Sam +61 412 345 678
+They said: "live wire hanging nearby"
+Open the job: https://<your app>/staff/12
+```
+
+Alerts go out in the background, so the customer's reply is never delayed. The same job and reason alert at most once every 30 minutes. Messages from the owner's number get no customer reply. A failed alert is logged as `owner alert FAILED` with Meta's error code.
+
+Settings:
+
+| Variable | Example |
+| --- | --- |
+| `OWNER_WHATSAPP` | `+61412345678`, the owner's own number, not the bot's. Empty means alerts are log lines only. |
+| `OWNER_ALERT_TEMPLATE` | `owner_job_alert`, the approved template below |
+| `OWNER_ALERT_LANGUAGE` | `en`, the template's language code |
+| `PUBLIC_BASE_URL` | `https://whatsapp-tradie-bot.onrender.com`, used for the staff-desk link |
+
+WhatsApp only allows free text to someone who has messaged the business number in the last 24 hours, so alerts need an approved **utility** template. In WhatsApp Manager, go to **Message templates** and choose **Create template**. Set the category to **Utility**, the name to `owner_job_alert` and the language to **English**, then use this body:
+
+```
+Job alert from your WhatsApp assistant: {{1}}
+Job: {{2}}
+Customer: {{3}}
+They said: "{{4}}"
+Open the job: {{5}}
+Please contact the customer as soon as you can.
+```
+
+Sample values for the review:
+- {{1}}: `URGENT SAFETY: possible live wire`
+- {{2}}: `#12, Fault finding and power loss, Newtown, emergency`
+- {{3}}: `Sam +61 412 345 678`
+- {{4}}: `live wire hanging nearby`
+- {{5}}: `https://example.com/staff/12`
+
+Until the template is approved, leave `OWNER_ALERT_TEMPLATE` empty. Alerts then go as free text and arrive only if the owner has messaged the bot's number in the last 24 hours. While the Meta app is in development mode, add the owner's number as an allowed recipient.
+
 ## Model calls, logs and traces
 
 Every customer message the bot answers writes one row to the `llm_calls` table. The row records:

@@ -52,3 +52,10 @@ services:
         sync: false
       - key: STAFF_SESSION_SECRET
         generateValue: true
+      # Owner alerts on WhatsApp (see README "Owner alerts").
+      - key: OWNER_WHATSAPP
+        sync: false
+      - key: OWNER_ALERT_TEMPLATE
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false

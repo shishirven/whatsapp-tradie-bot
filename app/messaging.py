@@ -33,7 +33,7 @@ class MessagingGateway(Protocol):
     def send_text(self, to: str, body: str) -> str:
         """Deliver one session text message. Return the provider message id."""
 
-    def send_template(self, to: str, template_name: str, body_params: list[str]) -> str:
+    def send_template(self, to: str, template_name: str, body_params: list[str], language: str = "en") -> str:
         """Deliver one template message. Return the provider message id."""
 
 
@@ -60,7 +60,7 @@ class SimulatedGateway:
     def send_text(self, to: str, body: str) -> str:
         return f"sim_{uuid.uuid4().hex[:16]}"
 
-    def send_template(self, to: str, template_name: str, body_params: list[str]) -> str:
+    def send_template(self, to: str, template_name: str, body_params: list[str], language: str = "en") -> str:
         return f"sim_{uuid.uuid4().hex[:16]}"
 
 
@@ -119,6 +119,8 @@ class WhatsAppCloudGateway:
                 timeout=15,
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DeliveryError(f"{exc.response.status_code} {_graph_error(exc.response)}") from exc
         except httpx.HTTPError as exc:
             raise DeliveryError(str(exc)) from exc
         data = response.json()
@@ -127,7 +129,9 @@ class WhatsAppCloudGateway:
         except (KeyError, IndexError, TypeError) as exc:
             raise DeliveryError(f"unexpected WhatsApp response: {data!r}") from exc
 
-    def build_template_payload(self, to: str, template_name: str, body_params: list[str]) -> dict:
+    def build_template_payload(
+        self, to: str, template_name: str, body_params: list[str], language: str = "en"
+    ) -> dict:
         components = []
         if body_params:
             components.append(
@@ -143,14 +147,14 @@ class WhatsAppCloudGateway:
             "type": "template",
             "template": {
                 "name": template_name,
-                "language": {"code": "en"},
+                "language": {"code": language or "en"},
                 "components": components,
             },
         }
 
-    def send_template(self, to: str, template_name: str, body_params: list[str]) -> str:
+    def send_template(self, to: str, template_name: str, body_params: list[str], language: str = "en") -> str:
         # TODO: template_name must be the approved name, not the stub.
-        payload = self.build_template_payload(to, template_name, body_params)
+        payload = self.build_template_payload(to, template_name, body_params, language)
         if not self.token or not self.phone_number_id:
             raise NotImplementedError(
                 "WhatsApp send is not configured. "
@@ -165,6 +169,8 @@ class WhatsAppCloudGateway:
                 timeout=15,
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DeliveryError(f"{exc.response.status_code} {_graph_error(exc.response)}") from exc
         except httpx.HTTPError as exc:
             raise DeliveryError(str(exc)) from exc
         data = response.json()
@@ -172,6 +178,17 @@ class WhatsAppCloudGateway:
             return data["messages"][0]["id"]
         except (KeyError, IndexError, TypeError) as exc:
             raise DeliveryError(f"unexpected WhatsApp response: {data!r}") from exc
+
+
+def _graph_error(response) -> str:
+    """Meta's error code and message, e.g. 131047 (outside the 24-hour window) or 132001 (no such template)."""
+    try:
+        error = response.json().get("error") or {}
+    except ValueError:
+        return " ".join((response.text or "").split())[:200]
+    details = (error.get("error_data") or {}).get("details")
+    parts = [f"code {error.get('code')}" if error.get("code") else None, error.get("message"), details]
+    return ": ".join(part for part in parts if part)[:300] or "error"
 
 
 def verify_meta_signature(body: bytes, header: str | None, secret: str | None) -> bool:
