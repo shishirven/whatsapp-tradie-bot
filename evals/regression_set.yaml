@@ -1,0 +1,427 @@
+# Regression set: short conversations that each pin one behaviour.
+#
+# Most cases come from bugs found in live use (the `why` line says which). Each turn is a
+# customer message after Riley's greeting, with code checks on the reply and on what was
+# stored on the job. Turns with a `model:` block replay a recorded Gemini output instead
+# of calling a model. Checks are defined in evals/regression.py (CHECKS).
+#
+# Add a case whenever a real conversation goes wrong: copy what the customer said, write
+# what should have happened as checks, and run `python -m evals.regression --case <id>`.
+
+cases:
+  # --- A. Nonsense first message: ask what they need, store nothing -----------------
+  - id: A1
+    category: nonsense_first_message
+    why: Live 18 Nov, "hha" became the job type and the suburb.
+    turns:
+      - say: "hha"
+        expect: [stores_nothing, {asks_about: job_type}, {reply_lacks: "put that on the job"}, {mentions_000: false}, one_question, {alerts: 0}]
+  - id: A2
+    category: nonsense_first_message
+    why: Keyboard mash.
+    turns:
+      - say: "asdfgh"
+        expect: [stores_nothing, {asks_about: job_type}, {reply_lacks: "put that on the job"}, one_question]
+  - id: A3
+    category: nonsense_first_message
+    why: A lone question mark.
+    turns:
+      - say: "?"
+        expect: [stores_nothing, {asks_about: job_type}, one_question]
+  - id: A4
+    category: nonsense_first_message
+    why: A lone full stop.
+    turns:
+      - say: "."
+        expect: [stores_nothing, {asks_about: job_type}]
+  - id: A5
+    category: nonsense_first_message
+    why: An emoji only.
+    turns:
+      - say: "🙂"
+        expect: [stores_nothing, {asks_about: job_type}]
+  - id: A6
+    category: nonsense_first_message
+    why: Repeated letters.
+    turns:
+      - say: "jjjjjj"
+        expect: [stores_nothing, {asks_about: job_type}, {reply_lacks: "outside the area"}]
+  - id: A7
+    category: nonsense_first_message
+    why: A one-letter acknowledgement is not a job.
+    turns:
+      - say: "k"
+        expect: [stores_nothing, {asks_about: job_type}]
+
+  # --- B. Vague request: ask what the electrical job is ------------------------------
+  - id: B1
+    category: vague_request
+    why: Wants an electrician but not what for.
+    turns:
+      - say: "need an electrician"
+        expect: [stores_nothing, {asks_about: job_type}, one_question]
+  - id: B2
+    category: vague_request
+    why: A bare request for help.
+    turns:
+      - say: "can you help"
+        expect: [{job_type: null}, {asks_about: job_type}]
+  - id: B3
+    category: vague_request
+    why: Electrical but nothing to book against.
+    turns:
+      - say: "got some electrical stuff that needs doing at home"
+        expect: [{job_type: null}, {asks_about: job_type}, no_echo]
+  - id: B4
+    category: vague_request
+    why: A configured suburb is kept, the vague job is not.
+    turns:
+      - say: "need some electrical stuff done at my place in Newtown"
+        expect: [{job_type: null}, {suburb: Newtown}, {asks_about: job_type}, no_echo]
+  - id: B5
+    category: vague_request
+    why: A quote for nothing in particular.
+    turns:
+      - say: "I need a quote"
+        expect: [{job_type: null}, {asks_about: job_type}]
+
+  # --- C. Not electrical or spam: decline politely, no job, no alert ------------------
+  - id: C1
+    category: not_electrical
+    why: Plumbing.
+    turns:
+      - say: "my toilet is blocked"
+        expect: [stores_nothing, {reply_contains: "electricians"}, {alerts: 0}, {handoff: false}]
+  - id: C2
+    category: not_electrical
+    why: Roofing.
+    turns:
+      - say: "the roof is leaking above the garage"
+        expect: [{job_type: null}, {reply_contains: "electricians"}, {alerts: 0}]
+  - id: C3
+    category: not_electrical
+    why: A sales pitch.
+    turns:
+      - say: "can you help me with SEO for my website"
+        expect: [stores_nothing, {reply_contains: "electricians"}, {alerts: 0}]
+  - id: C4
+    category: not_electrical
+    why: Water away from anything electrical is a plumber's job (contrast with G4).
+    turns:
+      - say: "water dripping from the kitchen tap"
+        expect: [{job_type: null}, {mentions_000: false}, {reply_contains: "electricians"}]
+  - id: C5
+    category: not_electrical
+    why: Insisting on a non-electrical job never escalates or alerts the owner.
+    turns:
+      - say: "my toilet is blocked"
+        expect: [{alerts: 0}]
+      - say: "toilet is blocked!!"
+        expect: [{alerts: 0}, {handoff: false}]
+      - say: "the toilet is still blocked"
+        expect: [{alerts: 0}, {handoff: false}, {job_type: null}]
+
+  # --- D. Unclear answer mid-chat: ask the same thing again, keep what's on file ------
+  - id: D1
+    category: unclear_answer_mid_chat
+    why: Gibberish where the suburb should be.
+    turns:
+      - say: "need a new power point"
+        expect: [{job_type: power_point}, {asks_about: suburb}]
+      - say: "hha"
+        expect: [{suburb: null}, {job_type: power_point}, {asks_about: suburb}, {reply_lacks: "outside the area"}]
+  - id: D2
+    category: unclear_answer_mid_chat
+    why: Live 17 Nov, a joke answer to the suburb question opened a second job.
+    turns:
+      - say: "need a new power point"
+        expect: [{job_type: power_point}]
+      - say: "your moms house"
+        expect: [{suburb: null}, {job_type: power_point}, {asks_about: suburb}]
+  - id: D3
+    category: unclear_answer_mid_chat
+    why: '"I don''t know" is not a suburb.' 
+    turns:
+      - say: "need a new power point"
+      - say: "idk"
+        expect: [{suburb: null}, {job_type: power_point}]
+  - id: D4
+    category: unclear_answer_mid_chat
+    why: Keyboard mash mid-intake.
+    turns:
+      - say: "need a new power point"
+      - say: "zzzz"
+        expect: [{suburb: null}, {job_type: power_point}, {asks_about: suburb}]
+  - id: D5
+    category: unclear_answer_mid_chat
+    why: A real out-of-area suburb is an answer, not nonsense.
+    turns:
+      - say: "need a new power point"
+      - say: "Kew"
+        expect: [{suburb: Kew}, {reply_contains: "outside the area"}, {reply_lacks: "didn't quite catch"}]
+
+  - id: D6
+    category: unclear_answer_mid_chat
+    why: A short suburb typed in lowercase is asked once more, then believed when repeated.
+    turns:
+      - say: "need a new power point"
+      - say: "kew"
+        expect: [{suburb: null}, {asks_about: suburb}]
+      - say: "kew"
+        expect: [{suburb: Kew}, {reply_lacks: "didn't quite catch"}, {handoff: false}]
+
+  # --- E. Escalation path: question, then menu, then a person ------------------------
+  - id: E1
+    category: escalation_path
+    why: Three unclear messages in a row end with a person, not a loop.
+    turns:
+      - say: "hha"
+        expect: [{asks_about: job_type}, {handoff: false}]
+      - say: "asdf"
+        expect: [{reply_contains: ["Reply with a number", "1. Fault finding"]}, {handoff: false}, {alerts: 0}]
+      - say: "zzz"
+        expect: [{handoff: true}, {handoff_reason: unclear_request}, {alerts: 1}, {reply_contains: "a person from the"}]
+  - id: E2
+    category: escalation_path
+    why: A number from the menu picks the job and intake carries on.
+    turns:
+      - say: "hha"
+      - say: "asdf"
+        expect: [{reply_contains: "2. Power point or lighting"}]
+      - say: "2"
+        expect: [{job_type: power_point}, {reply_contains: "Power point or lighting"}, {asks_about: suburb}]
+  - id: E3
+    category: escalation_path
+    why: A clear message resets the count, so the next unclear one is not a menu.
+    turns:
+      - say: "hha"
+      - say: "need a new power point"
+        expect: [{job_type: power_point}]
+      - say: "zzz"
+        expect: [{reply_lacks: "Reply with a number"}, {handoff: false}, {job_type: power_point}]
+
+  # --- F. Look-alikes that must NOT be clarified -------------------------------------
+  - id: F1
+    category: must_not_clarify
+    why: A configured suburb alone answers the greeting's suburb question.
+    turns:
+      - say: "Newtown"
+        expect: [{suburb: Newtown}, {asks_about: job_type}, {reply_lacks: "didn't quite catch"}]
+  - id: F2
+    category: must_not_clarify
+    why: Picking a visit slot by number.
+    turns:
+      - say: "need a new power point in Newtown"
+        expect: [{reply_contains: "reply 1, 2, or 3"}]
+      - say: "2"
+        expect: [booked, {reply_lacks: "didn't quite catch"}]
+  - id: F3
+    category: must_not_clarify
+    why: A loosely worded answer still counts ("wiring is the issue").
+    turns:
+      - say: "wiring is the issue"
+        expect: [{job_type: any}, {reply_lacks: "didn't quite catch"}]
+  - id: F4
+    category: must_not_clarify
+    why: Short but urgent. A hazard is never answered with a clarifying question.
+    turns:
+      - say: "sparks!!"
+        expect: [mentions_000, {reply_lacks: "didn't quite catch"}, {urgency: emergency}]
+  - id: F5
+    category: must_not_clarify
+    why: Golden case 14. A visit request is handled by booking.
+    turns:
+      - say: "Can someone come tomorrow morning?"
+        expect: [{reply_contains: "earliest slot"}, {reply_lacks: "didn't quite catch"}]
+  - id: F6
+    category: must_not_clarify
+    why: A configured job word.
+    turns:
+      - say: "hot water not working"
+        expect: [{job_type: hot_water}, {reply_lacks: "didn't quite catch"}]
+  - id: F7
+    category: must_not_clarify
+    why: A symptom with no job word still names electrical work.
+    turns:
+      - say: "lights keep flickering in the kitchen"
+        expect: [{job_type: power_point}, {reply_lacks: "didn't quite catch"}]
+  - id: F8
+    category: must_not_clarify
+    why: A greeting is answered normally, not treated as nonsense.
+    turns:
+      - say: "hi there"
+        expect: [stores_nothing, {asks_about: job_type}, {reply_lacks: "didn't quite catch"}]
+
+  # --- G. Hazard contrast pairs: the right script for each ----------------------------
+  - id: G1
+    category: hazard_contrast
+    why: Live 17 Nov, a beeping smoke alarm got the fire script.
+    turns:
+      - say: "smoke alarm beeping"
+        expect: [{job_type: smoke_alarm}, {mentions_000: false}]
+  - id: G2
+    category: hazard_contrast
+    why: An alarm going off with a burning smell is a fire.
+    turns:
+      - say: "my smoke alarm is going off and I can smell burning"
+        expect: [mentions_000, {urgency: emergency}]
+  - id: G3
+    category: hazard_contrast
+    why: Live 17 Nov, an alarm that keeps activating got the switchboard script.
+    turns:
+      - say: "fire alarma keeps activating"
+        expect: [{reply_contains: "fire brigade"}, {reply_lacks: "keep clear of the board"}, {job_type: smoke_alarm}]
+  - id: G4
+    category: hazard_contrast
+    why: Water near electrics is urgent (contrast with C4).
+    turns:
+      - say: "water leaking into the power point in the bathroom"
+        expect: [{reply_contains: "don't touch"}, {urgency: urgent}]
+  - id: G5
+    category: hazard_contrast
+    why: Live 17 Nov, a hanging live wire got an ordinary booking reply.
+    turns:
+      - say: "live wire hanging nearby"
+        expect: [{reply_contains: "8 metres"}, mentions_000, {urgency: emergency}]
+  - id: G6
+    category: hazard_contrast
+    why: Live 17 Nov, a misspelled powerline was read as a suburb.
+    turns:
+      - say: "tree fell on pworline"
+        expect: [{reply_contains: "8 metres"}, {suburb: null}, {reply_lacks: "outside the area"}]
+  - id: G7
+    category: hazard_contrast
+    why: '"Shocked" about a bill is not an electric shock.' 
+    turns:
+      - say: "I was shocked by the invoice"
+        expect: [{mentions_000: false}]
+
+  # --- H. Model output hygiene: replayed Gemini outputs -----------------------------
+  - id: H1
+    category: model_output_hygiene
+    why: Live 17 Nov, Gemini wrote the dash as "–" and restated the booked time.
+    turns:
+      - say: "install lighting in Newtown"
+        model: {reply: "Thanks!", job_type: power_point, suburb: Newtown, intent: service_request}
+        expect: [{reply_contains: "reply 1, 2, or 3"}]
+      - say: "2"
+        model:
+          reply: "Got it, Mon 16 Nov between 9:30 am and 11:00 am. Could I please grab your name?"
+          preferred_time: "Mon 16 Nov, 9:30 am \\u2013 11:00 am"
+          intent: answer
+        expect: [booked, {said_once: "You're booked for"}, {reply_lacks: "Got it, Mon"}, {preferred_time: clean}]
+  - id: H2
+    category: model_output_hygiene
+    why: Live 17 Nov, a name typed in lowercase was stored that way.
+    turns:
+      - say: "need a power point fixed in Newtown"
+        model: {reply: "Sure. What name should I put on the job?", job_type: power_point, suburb: Newtown, intent: service_request}
+      - say: "robbie williams"
+        model: {reply: "Thanks Robbie!", contact_name: "robbie williams", intent: answer}
+        expect: [{contact_name: "Robbie Williams"}]
+  - id: H3
+    category: model_output_hygiene
+    why: The model calls nonsense a job; the rules still catch it.
+    turns:
+      - say: "hha"
+        model: {reply: "Got it!", job_type: hha, suburb: Hha, intent: service_request}
+        expect: [stores_nothing, {asks_about: job_type}]
+  - id: H4
+    category: model_output_hygiene
+    why: The model sees no hazard in a live wire; the rules still do.
+    turns:
+      - say: "live wire hanging nearby"
+        model: {reply: "No worries, which suburb?", hazard: none, intent: service_request}
+        expect: [{reply_contains: "8 metres"}, mentions_000]
+  - id: H5
+    category: model_output_hygiene
+    why: The model reads "fire alarm" as a fire.
+    turns:
+      - say: "fire alarm keeps going off"
+        model: {reply: "Call 000!", hazard: fire, intent: service_request}
+        expect: [{reply_contains: "fire brigade"}, {reply_lacks: "keep clear of the board"}]
+  - id: H6
+    category: model_output_hygiene
+    why: The model's own clarifying question is used when it's short and safe.
+    turns:
+      - say: "hha"
+        model: {reply: "Hey!", intent: unclear, clarifying_question: "Sorry, I didn't get that. What electrical work can we help with?"}
+        expect: [{reply_contains: "What electrical work can we help with?"}, stores_nothing]
+  - id: H7
+    category: model_output_hygiene
+    why: A clarifying question with a price in it is replaced by the safe wording.
+    turns:
+      - say: "need an electrician"
+        model: {reply: "Sure", intent: vague_request, clarifying_question: "It's $95 to come out. What do you need?"}
+        expect: [{reply_lacks: "$95"}, {asks_about: job_type}]
+  - id: H8
+    category: model_output_hygiene
+    why: The model saw a hazard the keyword rules miss; the vetted script is sent.
+    turns:
+      - say: "the thing from the pole to my roof is lying across the driveway"
+        model: {reply: "Which suburb?", hazard: powerline, intent: service_request}
+        expect: [{reply_contains: "8 metres"}, mentions_000, {urgency: emergency}]
+
+  # --- I. Wording ------------------------------------------------------------------
+  - id: I1
+    category: wording
+    why: 17 Nov, plural "downlights" didn't match, and the reply read the message back.
+    turns:
+      - say: "need 6 downlights installed in Newtown"
+        expect: [{job_type: power_point}, no_echo]
+  - id: I2
+    category: wording
+    why: 17 Nov, "the owner" started a sentence in lowercase.
+    turns:
+      - say: "how much for a new power point?"
+        expect: [owner_capitalised, {reply_contains: "The owner"}]
+  - id: I3
+    category: wording
+    why: 17 Nov, a refund request said "him" and was stored as a job type.
+    turns:
+      - say: "I want a full refund"
+        expect: [no_gendered_owner, {job_type: null}]
+  - id: I4
+    category: wording
+    why: The identity reply must not assume the owner is a man.
+    turns:
+      - say: "Am I talking to a real person?"
+        expect: [no_gendered_owner, {reply_contains: "AI assistant"}]
+  - id: I5
+    category: wording
+    why: Plural job words for other jobs.
+    turns:
+      - say: "quote for 3 ceiling fans"
+        expect: [{job_type: ceiling_fan}, no_echo]
+  - id: I6
+    category: wording
+    why: Plural alarm word plus "chirping".
+    turns:
+      - say: "my smoke detectors keep chirping"
+        expect: [{job_type: smoke_alarm}, {mentions_000: false}]
+
+  # --- J. Business questions: answer them, store no job --------------------------------
+  - id: J1
+    category: business_questions
+    why: A question about hours is not a job.
+    turns:
+      - say: "do you work weekends?"
+        expect: [{job_type: null}, {suburb: null}]
+  - id: J2
+    category: business_questions
+    why: A licence question.
+    turns:
+      - say: "are you licensed?"
+        expect: [{reply_contains: "licen"}, {job_type: null}]
+  - id: J3
+    category: business_questions
+    why: A service-area question uses the configured list.
+    turns:
+      - say: "Do you service Newtown?"
+        expect: [{reply_contains: "we cover Newtown"}, {job_type: null}]
+  - id: J4
+    category: business_questions
+    why: A call-out fee question.
+    turns:
+      - say: "how much is the call out fee"
+        expect: [{job_type: null}]

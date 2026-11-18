@@ -1098,7 +1098,7 @@ def _clarify(
     assessment = assess(
         text, model_intent=draft.intent, known=known, pending=pending, business=business,
         handled=handled, booked=booked, menu_choice=picked, wants_person=person,
-        opened_new_job=opened_new_job,
+        opened_new_job=opened_new_job, previous=_previous_customer_message(history),
     )
     keys = ("job_type", "suburb", "urgency", "description", "preferred_time", "contact_name")
     if picked:
@@ -1170,6 +1170,12 @@ def _with_clarity_state(intake: dict, clarity: _Clarity) -> dict:
         if clarity.menu:
             state["job_menu"] = list(clarity.menu)
     return state
+
+
+def _previous_customer_message(history: list[dict]) -> str | None:
+    """The customer's message before this one (the last user entry is this message)."""
+    users = [item for item in history or [] if item.get("role") == "user"]
+    return str(users[-2].get("content") or "") if len(users) >= 2 else None
 
 
 def _last_assistant_message(history: list[dict]) -> str:

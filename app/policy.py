@@ -569,7 +569,9 @@ def _complaint_reply(text: str, business: Business) -> str | None:
             f"I'm sorry this doesn't match what you expected. I'm sending this to {owner} to review "
             f"against your quote, and they'll call you {by_when}. Could you send the invoice number?"
         )
-    if "flickering" in lowered or "fixed last week" in lowered:
+    # "flickering" alone is a new fault; it's a complaint only when it came back after our work.
+    repeat = any(word in lowered for word in ("again", "fixed", "came back", "still", "you did"))
+    if ("flickering" in lowered and repeat) or "fixed last week" in lowered:
         return (
             f"Sorry to hear that. I've reopened your job and marked it priority. "
             f"{owner} will be in touch to arrange a return visit. Is it the same light as before?"

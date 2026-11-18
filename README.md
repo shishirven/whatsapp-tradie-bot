@@ -271,6 +271,23 @@ Logs: the app's own `tradie.*` loggers print to stdout at `LOG_LEVEL` (default `
 
 Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` if the backend needs a key) to send OpenTelemetry traces to any OTLP backend, such as Langfuse, Arize Phoenix, Grafana or Honeycomb. Each message is a `whatsapp.turn` span with a `chat <model>` child that uses the GenAI semantic conventions (`gen_ai.provider.name`, `gen_ai.response.model`, `gen_ai.usage.*`). The `tradie.turn_id` attribute matches the `llm_calls` row. Spans carry no phone numbers or message text. With no endpoint set, tracing is off.
 
+## Regression set
+
+`evals/regression_set.yaml` holds about 60 short conversations, each pinning one behaviour. Most come from bugs found in live use; each case's `why` line says which. The owner's golden set is single messages with reference replies, and it stays as written. Regression cases are multi-turn: Riley greets, then each customer message is sent in turn. Code checks look at the reply and at what was stored on the job, for example:
+- `stores_nothing`, `job_type`, `suburb`
+- `asks_about`, `one_question`, `mentions_000`, `no_echo`
+- `handoff_reason`, `alerts`, `booked`
+
+A turn with a `model:` block replays a recorded Gemini output (such as `\u2013` in a time), so the app's handling of a model quirk is tested without calling a model. The cases run against a pinned copy of the business config (`evals/fixtures/regression_business.json`).
+
+```bash
+python -m evals.regression --offline                  # what CI runs (also via pytest)
+python -m evals.regression                            # adds live Gemini when GEMINI_API_KEY is set
+python -m evals.regression --category vague_request --repeats 3 --rpm 5
+```
+
+Live results are reported per category as pass, fail, unstable (the verdict flipped between repeats) or fallback (Gemini failed and the offline qualifier answered). The report is written to `evals/results/regression_latest.md`. When a real conversation goes wrong, add it as a case.
+
 ## Render
 
 `render.yaml` is a Docker web service on the **Starter** plan. Starter is paid and does not sleep, so Meta can reach the webhook. A free web service spins down and drops verification and message retries.
