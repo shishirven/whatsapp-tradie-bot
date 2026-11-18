@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from app.business import Business, load_business
+from app.hazards import EMERGENCY, URGENT, classify_hazard, without_alarm_devices
 
 _NAME = re.compile(
     r"\b(?:my name is|i am|i'm|this is)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)",
@@ -90,6 +91,13 @@ _URGENT = (
     "this afternoon",
     "straight away",
     "straightaway",
+    "immediately",
+    "fixed now",
+    "done now",
+    "need it now",
+    "need someone now",
+    "come now",
+    "now please",
 )
 
 _PREFERRED = (
@@ -107,12 +115,12 @@ def extract_job_type(text: str, business: Business | None = None) -> str | None:
     matches: list[tuple[int, int, str, bool]] = []
     for job in business.job_types:
         for alias in job.aliases:
-            # Allow a plural: "downlights", "power points", "smoke alarms".
-            match = re.search(rf"\b{re.escape(alias.casefold())}(?:e?s)?\b", lowered)
+            # "downlights", "power points" and "ceiling fans" match their singular alias.
+            match = re.search(rf"\b{re.escape(alias.casefold())}(?:s|es)?\b", lowered)
             if match:
                 matches.append((match.start(), -len(alias), job.id, job.emergency))
     if not matches:
-        return None
+        return _hazard_job(text, business)
     if _urgency_label(lowered) == "emergency":
         emergency = [item for item in matches if item[3]]
         if emergency:
@@ -189,10 +197,29 @@ def extract_facts(text: str, business: Business | None = None) -> dict:
 
 
 def _urgency_label(lowered: str) -> str | None:
-    if any(phrase in lowered for phrase in _EMERGENCY):
+    hazard = classify_hazard(lowered)
+    if hazard is not None and hazard.tier == EMERGENCY:
         return "emergency"
+    # "smoke" in "smoke alarm" is the device, not a fire.
+    if any(phrase in without_alarm_devices(lowered) for phrase in _EMERGENCY):
+        return "emergency"
+    if hazard is not None and hazard.tier == URGENT:
+        return "urgent"
     if any(phrase in lowered for phrase in _PLANNED):
         return "planned"
     if any(phrase in lowered for phrase in _URGENT):
         return "urgent"
+    return None
+
+
+def _hazard_job(text: str, business: Business) -> str | None:
+    """A hazard with no job word ("live wire hanging nearby") is a fault call-out."""
+    hazard = classify_hazard(text)
+    if hazard is None or hazard.tier not in (EMERGENCY, URGENT):
+        return None
+    if hazard.kind == "alarm" and business.resolve_job_type("smoke_alarm"):
+        return "smoke_alarm"
+    for job in business.job_types:
+        if job.emergency:
+            return job.id
     return None

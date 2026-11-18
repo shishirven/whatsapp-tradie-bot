@@ -117,7 +117,68 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_provider
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages(conversation_id, id);
+
+-- One row per customer message the model (or its offline stand-in) answered.
+-- Enough to see what happened on a turn, replay it against a new prompt, and
+-- turn real conversations into eval cases. Message text lives in messages.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    conversation_id INTEGER REFERENCES conversations(id),
+    job_id INTEGER REFERENCES jobs(id),
+    inbound_message_id INTEGER REFERENCES messages(id),
+    purpose TEXT NOT NULL DEFAULT 'qualify',
+    provider TEXT,
+    model TEXT,
+    status TEXT NOT NULL,
+    fallback_from TEXT,
+    attempts_json TEXT NOT NULL DEFAULT '[]',
+    latency_ms INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    prompt_version TEXT,
+    system_hash TEXT,
+    history_len INTEGER,
+    raw_output_json TEXT,
+    model_reply TEXT,
+    sent_reply TEXT,
+    hazard_rules TEXT,
+    hazard_model TEXT,
+    hazard_final TEXT,
+    policy_rule TEXT,
+    urgency TEXT,
+    escalation_reason TEXT,
+    handoff INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_created ON llm_calls(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_conversation ON llm_calls(conversation_id, id);
+
+-- How far each export (e.g. llm_calls to S3) has got.
+CREATE TABLE IF NOT EXISTS ship_marks (
+    name TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Each distinct system prompt, stored once and referenced by hash.
+CREATE TABLE IF NOT EXISTS prompts (
+    hash TEXT PRIMARY KEY,
+    prompt_version TEXT,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
+
+LLM_CALL_COLUMNS = (
+    "turn_id", "conversation_id", "job_id", "inbound_message_id", "purpose", "provider",
+    "model", "status", "fallback_from", "attempts_json", "latency_ms", "input_tokens",
+    "output_tokens", "prompt_version", "system_hash", "history_len", "raw_output_json",
+    "model_reply", "sent_reply", "hazard_rules", "hazard_model", "hazard_final",
+    "policy_rule", "urgency", "escalation_reason", "handoff", "error",
+)
 
 _LEGACY_LEAD_COLUMNS = {
     "job_type": "TEXT",
@@ -428,6 +489,75 @@ class Database:
                 "SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
         return dict(stored)
+
+    def record_llm_call(self, values: dict, *, system_prompt: str | None = None) -> int:
+        """Store one turn's model call. Unknown keys are ignored. Returns the row id."""
+        now = self.timestamp()
+        row = {key: values.get(key) for key in LLM_CALL_COLUMNS}
+        row["status"] = row["status"] or "ok"
+        row["purpose"] = row["purpose"] or "qualify"
+        row["attempts_json"] = row["attempts_json"] or "[]"
+        row["handoff"] = 1 if row["handoff"] else 0
+        columns = ", ".join(("created_at", *LLM_CALL_COLUMNS))
+        marks = ", ".join("?" for _ in range(len(LLM_CALL_COLUMNS) + 1))
+        with self.connect() as conn:
+            if system_prompt and row["system_hash"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO prompts (hash, prompt_version, text, created_at) VALUES (?, ?, ?, ?)",
+                    (row["system_hash"], row["prompt_version"], system_prompt, now),
+                )
+            cursor = conn.execute(
+                f"INSERT INTO llm_calls ({columns}) VALUES ({marks})",
+                (now, *(row[key] for key in LLM_CALL_COLUMNS)),
+            )
+            return int(cursor.lastrowid)
+
+    def list_llm_calls(
+        self, *, since: str | None = None, limit: int | None = None, after_id: int | None = None
+    ) -> list[dict]:
+        """Model calls, oldest first, with the customer's message text joined in."""
+        sql = """
+            SELECT c.*, m.body AS inbound_text
+            FROM llm_calls c
+            LEFT JOIN messages m ON m.id = c.inbound_message_id
+        """
+        params: list = []
+        where = []
+        if since:
+            where.append("c.created_at >= ?")
+            params.append(since)
+        if after_id is not None:
+            where.append("c.id > ?")
+            params.append(int(after_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY c.id"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def get_ship_mark(self, name: str) -> int:
+        """Id of the last row an export has delivered (0 when it has never run)."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT last_id FROM ship_marks WHERE name = ?", (name,)).fetchone()
+        return int(row["last_id"]) if row else 0
+
+    def set_ship_mark(self, name: str, last_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ship_marks (name, last_id, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at
+                """,
+                (name, int(last_id), self.timestamp()),
+            )
+
+    def get_prompt(self, system_hash: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT text FROM prompts WHERE hash = ?", (system_hash,)).fetchone()
+        return row["text"] if row else None
 
     def get_message(self, message_id: int) -> dict | None:
         with self.connect() as conn:

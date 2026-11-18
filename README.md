@@ -85,6 +85,8 @@ Visit times come from `Calendar`. With Google credentials that is the Calendar A
 
 Gemini is the recommended reader. It calls `record_job_intake` on every turn (`function_calling_config` mode ANY) and returns the WhatsApp reply plus the job facts. The same scrubber removes any sentence that still contains a price before send. A free-tier 429, or any other Gemini error, uses the offline qualifier for that turn so the webhook still answers.
 
+Electrical hazards are checked twice on every turn. `app/hazards.py` holds keyword rules (fallen or exposed wires, powerlines, a person stuck to the power, shocks and tingles, fire, water near electrics, overheating, swollen batteries, and whole-street outages). `record_job_intake` also returns a `hazard` field (`none`, `wire`, `powerline`, `shock`, `person_down`, `fire`, `water`, `overheating`, `battery`, or `street_outage`). Either side can raise a hazard and the model cannot lower one. When both find one, the rules choose. The hazard picks a fixed safety reply from `app/policy.py`; the model never writes the safety advice. Each disagreement is logged as `hazard disagreement rules=... model=...` so missed phrasings can be added to the rules.
+
 Claude stays available. Sonnet 5.5 does not accept a forced tool choice (`tool_choice` of `any` or `tool` returns 400). That call uses `tool_choice: auto`, a strict schema, and a prompt that tells the assistant to call `record_job_intake` every turn. `thinking` is `between_tools`. If the model replies in plain text anyway, that text is sent and no new facts are stored.
 
 With no API key, `LLM_PROVIDER` defaults to `mock`: a keyword extractor in `app/extract.py`. It is there so you can click through the product. It is not the reader you ship. If `LLM_PROVIDER` is unset and `GEMINI_API_KEY` is set, Gemini is selected. An Anthropic key alone still selects Claude.
@@ -169,6 +171,77 @@ docker run --rm --name whatsapp-tradie-bot -p 8000:8000 --env-file .env -v whats
 ```
 
 The image stores SQLite at `/data/tradie.db`. Leave `SQLITE_PATH` commented out in `.env` so that path is not overridden. The process listens on `PORT` (8000 if unset).
+
+## Owner alerts
+
+When a customer reports a hazard, complains, asks for a person, or becomes a hot lead, the bot sends an alert to the owner's own WhatsApp:
+
+```
+URGENT SAFETY: possible live wire
+Job: #12, Fault finding and power loss, Newtown, emergency
+Customer: Sam +61 412 345 678
+They said: "live wire hanging nearby"
+Open the job: https://<your app>/staff/12
+```
+
+Alerts go out in the background, so the customer's reply is never delayed. The same job and reason alert at most once every 30 minutes. Messages from the owner's number get no customer reply. A failed alert is logged as `owner alert FAILED` with Meta's error code.
+
+Settings:
+
+| Variable | Example |
+| --- | --- |
+| `OWNER_WHATSAPP` | `+61412345678`, the owner's own number, not the bot's. Empty means alerts are log lines only. |
+| `OWNER_ALERT_TEMPLATE` | `owner_job_alert`, the approved template below |
+| `OWNER_ALERT_LANGUAGE` | `en`, the template's language code |
+| `PUBLIC_BASE_URL` | `https://whatsapp-tradie-bot.onrender.com`, used for the staff-desk link |
+
+WhatsApp only allows free text to someone who has messaged the business number in the last 24 hours, so alerts need an approved **utility** template. In WhatsApp Manager, go to **Message templates** and choose **Create template**. Set the category to **Utility**, the name to `owner_job_alert` and the language to **English**, then use this body:
+
+```
+Job alert from your WhatsApp assistant: {{1}}
+Job: {{2}}
+Customer: {{3}}
+They said: "{{4}}"
+Open the job: {{5}}
+Please contact the customer as soon as you can.
+```
+
+Sample values for the review:
+- {{1}}: `URGENT SAFETY: possible live wire`
+- {{2}}: `#12, Fault finding and power loss, Newtown, emergency`
+- {{3}}: `Sam +61 412 345 678`
+- {{4}}: `live wire hanging nearby`
+- {{5}}: `https://example.com/staff/12`
+
+Until the template is approved, leave `OWNER_ALERT_TEMPLATE` empty. Alerts then go as free text and arrive only if the owner has messaged the bot's number in the last 24 hours. While the Meta app is in development mode, add the owner's number as an allowed recipient.
+
+## Model calls, logs and traces
+
+Every customer message the bot answers writes one row to the `llm_calls` table. The row records:
+- **Who answered:** Gemini, Claude, or the offline stand-in, and the exact model.
+- **Timing and cost:** response time and tokens.
+- **Each attempt:** every fallback hop and its error.
+- **The output:** the model's raw tool output, the reply it wrote, and the reply actually sent.
+- **Hazards and guardrails:** the keyword and model hazard verdicts, and which guardrail rule replaced the reply (for example `safety:wire` or `price`).
+- **Versions:** a `prompt_version` id for the prompt template, business config and tool schema.
+
+Each distinct system prompt is stored once in `prompts`, so a turn can be replayed against a new prompt. Writing a record never blocks a reply.
+
+```bash
+python -m app.llm_log summary                    # volume, fallback rate, p50/p95 latency, tokens, hazards, disagreements
+python -m app.llm_log --since 2026-11-01 export calls.jsonl   # one row per turn, with empty label/note for error analysis
+```
+
+Copy to S3: set `LOG_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (an IAM user that can only reach that bucket) and `AWS_REGION` (default `ap-southeast-2`). Every 5 minutes (`LOG_SHIP_INTERVAL_SECONDS`), new rows are uploaded as gzipped JSON Lines to `s3://<LOG_BUCKET>/llm_calls/dt=YYYY-MM-DD/<first id>-<last id>.jsonl.gz`. A failed upload is retried and no rows are skipped. The files hold customers' words and the replies sent, so keep the bucket private.
+
+```bash
+python -m app.llm_log s3-check   # write, read back and delete a test file: proves the keys and bucket work
+python -m app.llm_log ship       # upload everything new right now
+```
+
+Logs: the app's own `tradie.*` loggers print to stdout at `LOG_LEVEL` (default `INFO`). Each turn logs one line, `turn {...}`, with the same summary. That line has no phone number or message text.
+
+Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` if the backend needs a key) to send OpenTelemetry traces to any OTLP backend, such as Langfuse, Arize Phoenix, Grafana or Honeycomb. Each message is a `whatsapp.turn` span with a `chat <model>` child that uses the GenAI semantic conventions (`gen_ai.provider.name`, `gen_ai.response.model`, `gen_ai.usage.*`). The `tradie.turn_id` attribute matches the `llm_calls` row. Spans carry no phone numbers or message text. With no endpoint set, tracing is off.
 
 ## Render
 

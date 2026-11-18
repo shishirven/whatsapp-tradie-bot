@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +37,10 @@ from app.booking import (
 from app.business import Business, load_business
 from app.db import Database
 from app.intake import apply_intake, delivered_intake, is_non_answer, render_reply
+from app.hazards import classify_hazard
 from app.llm import TurnContext
+from app.llm_log import prompt_version, record_turn
+from app.telemetry import model_call_attributes, set_attributes, span
 from app.media import (
     MediaDownloader,
     MediaError,
@@ -47,7 +51,7 @@ from app.media import (
 )
 from app.messaging import DeliveryError, Inbound, MessagingGateway
 from app.notify import StaffNotifier
-from app.policy import apply_policy, asks_for_visit, guardrail_block, is_repeat_fault, is_safety_message
+from app.policy import apply_policy, asks_for_visit, guardrail_block, hazard_urgency, is_repeat_fault, resolve_hazard
 from app.quotes import customer_quote_text, draft_quote, scrub_prices
 from app.routing import (
     KeywordIntentClassifier,
@@ -58,7 +62,7 @@ from app.routing import (
     status_reply,
     suburb_in_address,
 )
-from app.scoring import canonical_facts, handoff_decision, merge_facts, score_lead, wants_human
+from app.scoring import FACT_KEYS, canonical_facts, handoff_decision, merge_facts, score_lead, wants_human
 from app.window import outbound_plan, parse_stored_time
 
 logger = logging.getLogger("tradie.service")
@@ -245,6 +249,32 @@ def handle_incoming(
     now: datetime | None = None,
     intent=None,
 ) -> dict:
+    """One customer message in, one reply out. Traced as `whatsapp.turn` when tracing is on."""
+    with span(
+        "whatsapp.turn",
+        {"messaging.system": "whatsapp", "tradie.message_type": inbound.message_type, "tradie.source": inbound.source},
+    ):
+        return _handle_incoming(
+            db, qualifier, gateway, notifier, inbound,
+            business=business, calendar=calendar, media=media, transcriber=transcriber,
+            now=now, intent=intent,
+        )
+
+
+def _handle_incoming(
+    db: Database,
+    qualifier,
+    gateway: MessagingGateway,
+    notifier: StaffNotifier,
+    inbound: Inbound,
+    *,
+    business: Business | None = None,
+    calendar: Calendar | None = None,
+    media: MediaDownloader | None = None,
+    transcriber: Transcriber | None = None,
+    now: datetime | None = None,
+    intent=None,
+) -> dict:
     business = business or load_business()
     moment = now or datetime.now(timezone.utc)
     if calendar is None:
@@ -364,7 +394,8 @@ def handle_incoming(
         conversation = db.set_status(conversation["id"], "open")
         route = "another"
 
-    db.add_message(conversation["id"], "in", body, inbound.provider_message_id, job_id=lead["id"])
+    inbound_row = db.add_message(conversation["id"], "in", body, inbound.provider_message_id, job_id=lead["id"])
+    turn_id = secrets.token_hex(8)
     # The message we just stored is the customer's latest message, so a reply
     # in this turn is inside the 24-hour window.
     last_customer_at = parse_stored_time(db.last_inbound_at(conversation["id"])) or moment
@@ -450,10 +481,33 @@ def handle_incoming(
         ),
         intake=intake_before,
     )
+    version = _prompt_version(business)
+    call_record = dict(
+        turn_id=turn_id,
+        conversation_id=conversation["id"],
+        job_id=lead["id"],
+        inbound_message_id=inbound_row.get("id"),
+        system_prompt=turn.system,
+        version=version,
+        history_len=len(history),
+    )
+    started = time.monotonic()
     try:
-        draft = qualifier.qualify(turn)
-    except Exception:
+        with span("chat", {"gen_ai.operation.name": "chat", "tradie.turn_id": turn_id}) as call_span:
+            draft = qualifier.qualify(turn)
+            attributes = model_call_attributes(getattr(draft, "meta", None))
+            set_attributes(call_span, attributes)
+            if call_span is not None and attributes.get("gen_ai.response.model"):
+                call_span.update_name(f"chat {attributes['gen_ai.response.model']}")
+    except Exception as exc:
         logger.exception("qualifier failed for conversation %s", conversation["id"])
+        record_turn(
+            db, **call_record,
+            latency_ms=int(round((time.monotonic() - started) * 1000)),
+            rule_hazard=classify_hazard(text),
+            sent_reply=_with_opening(opening, _APOLOGY),
+            error=f"{type(exc).__name__}: {' '.join(str(exc).split())[:200]}",
+        )
         _save(
             db, business, conversation, lead, photos, voice_notes, booking, quote,
             facts=known, score_label=lead["score"], score_reason=lead["score_reason"],
@@ -466,6 +520,7 @@ def handle_incoming(
             job_id=lead["id"],
         )
 
+    latency_ms = int(round((time.monotonic() - started) * 1000))
     facts, reply, intake_after, intake_prompt = _apply_draft(
         draft,
         text=text,
@@ -475,6 +530,10 @@ def handle_incoming(
         intake_before=intake_before,
         skip=bool(booked_reply) or wants_human(text) or bool(draft.request_human),
     )
+    # A hazard from the rules or the model's `hazard` field raises urgency before scoring.
+    urgency = hazard_urgency(facts.get("urgency"), resolve_hazard(text, draft.hazard, log=False))
+    if urgency != facts.get("urgency"):
+        facts = {**facts, "urgency": urgency}
     score = score_lead(facts, business)
     asked = bool(draft.request_human) or wants_human(text)
     handoff, handoff_reason = handoff_decision(score, asked)
@@ -492,7 +551,8 @@ def handle_incoming(
         if facts.get("urgency") == "emergency" and "000" not in reply:
             reply = f"{_SAFETY} {reply}"
     elif booked_reply:
-        reply = f"{booked_reply} {reply}".strip()
+        # The booking line already confirms the time; keep only the model's next question.
+        reply = f"{booked_reply} {_questions_only(reply)}".strip()
     elif _should_offer(facts, booking, business, moment):
         slots = available_slots(business, calendar, moment) if calendar is not None else []
         if slots:
@@ -501,12 +561,12 @@ def handle_incoming(
     if handoff:
         reply = with_handoff_line(reply, business)
     reply = scrub_prices(_with_opening(opening, reply)) or _APOLOGY
-    decision = apply_policy(text or "", business)
+    decision = apply_policy(text or "", business, model_hazard=draft.hazard)
     if decision.replacement:
         # Configured amounts are allowed through. The scrubber above already
         # removed any figure the model invented on its own.
         reply = _with_opening(opening, decision.replacement)
-    if decision.ensure_000 and "000" not in reply and is_safety_message(text or ""):
+    if decision.ensure_000 and "000" not in reply and decision.is_hazard:
         reply = f"Call 000 now. {reply}".strip()
     reply = _name_earliest_slot(
         reply, text or "", business, calendar, moment, offer_visit=decision.offer_visit
@@ -524,7 +584,7 @@ def handle_incoming(
     if decision.stop_intake:
         handoff = True
         handoff_reason = "abusive"
-    if not is_safety_message(text or ""):
+    if not decision.is_hazard:
         reply = _strip_false_emergency(reply)
     reply = _tidy_reply(reply)
 
@@ -541,13 +601,27 @@ def handle_incoming(
     )
     if handoff and conversation["status"] != "handed_off":
         db.set_status(conversation["id"], "handed_off")
-        _notify(notifier, saved, conversation, score.label, handoff_reason, facts)
+        _notify(
+            notifier, saved, conversation, score.label, handoff_reason, facts,
+            business=business, message=text, decision=decision,
+        )
     elif decision.escalated:
         _notify(
             notifier, saved, conversation, score.label,
             decision.escalation_reason or "escalated", facts,
+            business=business, message=text, decision=decision,
         )
 
+    record_turn(
+        db, **call_record,
+        draft=draft,
+        latency_ms=latency_ms,
+        decision=decision,
+        rule_hazard=classify_hazard(text),
+        sent_reply=reply,
+        urgency=facts.get("urgency"),
+        handoff=bool(handoff),
+    )
     purpose = "booking_confirmation" if booked_reply else "session"
     return _finish(
         db, gateway, conversation, reply, business,
@@ -975,14 +1049,30 @@ def _cancel_reply(text: str, business: Business, calendar: Calendar | None, mome
     return f"No problem, I've cancelled {when}."
 
 
+def _prompt_version(business: Business) -> str:
+    """Id of the prompt template, business config and tool schema, without any customer's facts."""
+    empty = {key: None for key in FACT_KEYS}
+    return prompt_version(build_system(empty, None, None, business))
+
+
 def _strip_false_emergency(reply: str) -> str:
     """Drop a leading 'Call 000 now' that was added to a message that is not a hazard."""
     return re.sub(r"(?i)^call 000 now\.?\s*", "", reply or "").strip()
 
 
+def _questions_only(reply: str) -> str:
+    """The question sentences of a reply, so a restated booking time is not said twice."""
+    sentences = re.split(r"(?<=[.!?])\s+", (reply or "").strip())
+    return " ".join(sentence for sentence in sentences if sentence.endswith("?"))
+
+
 def _tidy_reply(reply: str) -> str:
-    """Drop a null preference and a greeting sentence that was added twice."""
+    """Drop a null preference and a greeting sentence that was added twice.
+
+    With no owner name configured, replies say "the owner"; capitalise it when it starts a sentence.
+    """
     text = re.sub(r"(?i)\byou mentioned (?:null|none|undefined)\b\.?\s*", "", reply or "")
+    text = re.sub(r"(^|[.!?]\s+)the owner\b", lambda m: f"{m.group(1)}The owner", text)
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     seen: set[str] = set()
     kept: list[str] = []
@@ -1316,7 +1406,11 @@ def _event_description(lead: dict, conversation: dict) -> str:
     return "\n".join(parts)
 
 
-def _notify(notifier, saved, conversation, score_label, handoff_reason, facts) -> None:
+def _notify(
+    notifier, saved, conversation, score_label, handoff_reason, facts,
+    *, business: Business | None = None, message: str | None = None, decision=None,
+) -> None:
+    hazard = getattr(decision, "hazard", None) if decision is not None else None
     summary = {
         "lead_id": saved["id"],
         "conversation_id": conversation["id"],
@@ -1324,8 +1418,13 @@ def _notify(notifier, saved, conversation, score_label, handoff_reason, facts) -
         "score": score_label,
         "reason": handoff_reason,
         "job_type": facts.get("job_type"),
+        "job_label": business.job_label(facts.get("job_type")) if business and facts.get("job_type") else None,
         "suburb": facts.get("suburb"),
+        "urgency": facts.get("urgency"),
         "contact_name": facts.get("contact_name"),
+        # A real hazard (not a whole-street outage) leads the owner's alert.
+        "hazard": hazard.kind if hazard is not None and getattr(decision, "is_hazard", False) else None,
+        "message": message,
     }
     try:
         notifier.handoff(summary)

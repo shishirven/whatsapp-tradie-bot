@@ -14,12 +14,15 @@ text is the reply and no new facts are stored.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import re
+import time
+from dataclasses import dataclass, field
 
 import anthropic
 
 from app.business import Business, load_business
 from app.extract import extract_facts
+from app.hazards import MODEL_HAZARDS, classify_hazard, hazard_from_kind
 from app.intake import apply_intake, normalise_intake
 from app.scoring import canonical_facts, merge_facts, wants_human
 
@@ -63,7 +66,30 @@ QUALIFY_TOOL = {
             },
             "urgency": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                "description": "emergency, urgent, planned, or null.",
+                "description": (
+                    "emergency, urgent, planned, or null. Only what the customer has said about "
+                    "how soon it's needed; picking a visit time is not an urgency."
+                ),
+            },
+            "hazard": {
+                "type": "string",
+                "enum": list(MODEL_HAZARDS),
+                "description": (
+                    "Electrical danger in the customer's latest message. "
+                    "wire: a fallen, hanging, exposed, cut or damaged wire or cable, or a tree on one. "
+                    "powerline: street powerlines, a power pole, or the service line from the pole. "
+                    "shock: a shock or tingle from a tap, appliance or fitting. "
+                    "person_down: someone stuck to, or collapsed after touching, something electrical. "
+                    "fire: smoke, flames, sparks or a burning smell. "
+                    "alarm: a smoke or fire alarm going off or keeps activating, with no smoke, "
+                    "flames or burning mentioned. "
+                    "water: water, a leak or flooding near the switchboard, lights, power points or wiring. "
+                    "overheating: melting, scorch marks, a hot, buzzing or crackling fitting, a frayed lead. "
+                    "battery: a swollen, hissing, leaking or very hot home battery or inverter. "
+                    "street_outage: the whole street or area has no power. "
+                    "none: anything else, including a beeping smoke alarm, new wiring work, or a price question. "
+                    "When unsure between none and a hazard, choose the hazard."
+                ),
             },
             "description": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -87,6 +113,7 @@ QUALIFY_TOOL = {
             "job_type",
             "suburb",
             "urgency",
+            "hazard",
             "description",
             "preferred_time",
             "contact_name",
@@ -95,8 +122,22 @@ QUALIFY_TOOL = {
 }
 
 _FALLBACK_REPLY = "Could you tell me a little more about the job?"
+_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _MAX_HISTORY = 20
 _SAFETY = "If anyone is in danger, or you can smell burning, get out and call 000."
+
+
+@dataclass
+class CallMeta:
+    """How one turn's reply was produced: who answered, how long, how many tokens, what failed."""
+
+    provider: str  # gemini, anthropic, offline, unconfigured
+    model: str | None = None  # the model that actually answered
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    attempts: list[dict] = field(default_factory=list)  # [{"model", "ms", "error"?}] in order
+    fallback_from: str | None = None  # "gemini" when every Gemini model failed
+    status: str = "ok"  # ok, fallback, unstructured, unconfigured
 
 
 @dataclass
@@ -111,7 +152,9 @@ class QualificationDraft:
     description: str | None = None
     preferred_time: str | None = None
     contact_name: str | None = None
+    hazard: str | None = None
     raw: dict | None = None
+    meta: CallMeta | None = None
     intake: dict | None = None
     intake_prompt: str | None = None
 
@@ -146,6 +189,7 @@ class AnthropicQualifier:
     def qualify(self, turn: TurnContext) -> QualificationDraft:
         # between_tools skips the long up-front thinking pass. Sonnet 5.5
         # rejects thinking type "disabled", and it also rejects forced tool_choice.
+        started = time.monotonic()
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1500,
@@ -155,7 +199,18 @@ class AnthropicQualifier:
             thinking={"type": "between_tools"},
             messages=to_api_messages(turn.history[-_MAX_HISTORY:]),
         )
-        return parse_qualification(response)
+        elapsed = _ms_since(started)
+        draft = parse_qualification(response)
+        usage = getattr(response, "usage", None)
+        draft.meta = CallMeta(
+            provider="anthropic",
+            model=_str_or_none(getattr(response, "model", None)) or self.model,
+            input_tokens=_int_or_none(getattr(usage, "input_tokens", None)),
+            output_tokens=_int_or_none(getattr(usage, "output_tokens", None)),
+            attempts=[{"model": self.model, "ms": elapsed}],
+            status="unstructured" if draft.raw == {"unstructured": True} else "ok",
+        )
+        return draft
 
 
 class GeminiQualifier:
@@ -195,7 +250,9 @@ class GeminiQualifier:
         )
         contents = to_gemini_contents(turn.history[-_MAX_HISTORY:])
         last_error: Exception | None = None
+        attempts: list[dict] = []
         for index, model in enumerate(self.models):
+            started = time.monotonic()
             try:
                 response = self.client.models.generate_content(
                     model=model,
@@ -204,6 +261,7 @@ class GeminiQualifier:
                 )
             except Exception as exc:
                 last_error = exc
+                attempts.append({"model": model, "ms": _ms_since(started), "error": _error_label(exc)})
                 if should_try_next_model(exc) and index < len(self.models) - 1:
                     logger.warning(
                         "gemini qualify model %s unavailable (%s); trying the next model",
@@ -212,12 +270,23 @@ class GeminiQualifier:
                     )
                     continue
                 log_gemini_failure("qualify", exc, model)
-                return self._offline.qualify(turn)
+                return self._fallback(turn, attempts)
+            elapsed = _ms_since(started)
             try:
                 draft = parse_gemini_qualification(response)
             except Exception as exc:
                 log_gemini_failure("qualify parse", exc, model)
-                return self._offline.qualify(turn)
+                attempts.append({"model": model, "ms": elapsed, "error": f"parse: {_error_label(exc)}"})
+                return self._fallback(turn, attempts)
+            attempts.append({"model": model, "ms": elapsed})
+            usage = getattr(response, "usage_metadata", None)
+            draft.meta = CallMeta(
+                provider="gemini",
+                model=model,
+                input_tokens=_int_or_none(getattr(usage, "prompt_token_count", None)),
+                output_tokens=_int_or_none(getattr(usage, "candidates_token_count", None)),
+                attempts=attempts,
+            )
             logger.info("gemini qualify answered with model %s", model)
             return draft
         log_gemini_failure(
@@ -225,7 +294,18 @@ class GeminiQualifier:
             last_error or RuntimeError("no gemini model configured"),
             self.model,
         )
-        return self._offline.qualify(turn)
+        return self._fallback(turn, attempts)
+
+    def _fallback(self, turn: TurnContext, attempts: list[dict]) -> QualificationDraft:
+        """Every Gemini model failed. The offline qualifier answers, and the record says so."""
+        draft = self._offline.qualify(turn)
+        draft.meta = CallMeta(
+            provider="offline",
+            attempts=attempts,
+            fallback_from="gemini",
+            status="fallback",
+        )
+        return draft
 
 
 class RuleBasedQualifier:
@@ -235,6 +315,11 @@ class RuleBasedQualifier:
         self.business = business or load_business()
 
     def qualify(self, turn: TurnContext) -> QualificationDraft:
+        draft = self._qualify(turn)
+        draft.meta = CallMeta(provider="offline")
+        return draft
+
+    def _qualify(self, turn: TurnContext) -> QualificationDraft:
         latest = _latest_user_text(turn.history)
         extracted = extract_facts(latest, self.business)
         asked = wants_human(latest)
@@ -252,6 +337,7 @@ class RuleBasedQualifier:
                 description=extracted["description"],
                 preferred_time=extracted["preferred_time"],
                 contact_name=extracted["contact_name"],
+                hazard=_rule_hazard(latest),
                 raw=raw,
                 intake=normalise_intake(turn.intake),
             )
@@ -287,10 +373,36 @@ class RuleBasedQualifier:
             description=combined.get("description"),
             preferred_time=combined.get("preferred_time"),
             contact_name=combined.get("contact_name"),
+            hazard=_rule_hazard(latest),
             raw=raw,
             intake=outcome.intake,
             intake_prompt=outcome.prompt,
         )
+
+
+def _ms_since(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000))
+
+
+def _int_or_none(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _str_or_none(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _error_label(exc: Exception) -> str:
+    """Short, key-free description of a model error for the call record."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    name = type(exc).__name__
+    text = " ".join(str(exc).split())[:160]
+    return f"{code} {name}: {text}" if code else f"{name}: {text}"
+
+
+def _rule_hazard(text: str) -> str | None:
+    hazard = classify_hazard(text)
+    return hazard.kind if hazard else None
 
 
 class MissingKeyQualifier:
@@ -312,7 +424,12 @@ class MissingKeyQualifier:
                 "Add the key to your .env file, or unset LLM_PROVIDER to use the offline qualifier."
             )
         # intake is set so the service does not replace this explanation with a question.
-        return QualificationDraft(reply=reply, raw={"unconfigured": True}, intake=normalise_intake(None))
+        return QualificationDraft(
+            reply=reply,
+            raw={"unconfigured": True},
+            intake=normalise_intake(None),
+            meta=CallMeta(provider=self.provider, status="unconfigured"),
+        )
 
 
 def parse_qualification(response) -> QualificationDraft:
@@ -403,8 +520,15 @@ def _draft_from_tool(data: dict, texts: list[str]) -> QualificationDraft:
         description=_clean_str(data.get("description")),
         preferred_time=_clean_str(data.get("preferred_time")),
         contact_name=_clean_str(data.get("contact_name")),
+        hazard=_clean_hazard(data.get("hazard")),
         raw=data,
     )
+
+
+def _clean_hazard(value) -> str | None:
+    """A known hazard kind, or None for "none", null, or a name we do not know."""
+    hazard = hazard_from_kind(value if isinstance(value, str) else None)
+    return hazard.kind if hazard else None
 
 
 def _compose_reply(
@@ -435,8 +559,7 @@ def _compose_reply(
 
     new_job = extracted.get("job_type")
     if new_job and new_job != known.get("job_type"):
-        label = business.job_label(new_job) or _label(new_job)
-        parts.append(f"{label} — I'll put that on the job.")
+        parts.append(_job_acknowledgement(new_job, business))
     elif ad and not merged.get("job_type") and first_user_turn:
         headline = ad.get("headline") or "the ad you tapped"
         parts.append(f'I can help with "{headline}", or with something else.')
@@ -479,6 +602,14 @@ def _checklist_complete(facts: dict, business: Business) -> bool:
     )
 
 
+def _job_acknowledgement(job_type: str, business: Business) -> str:
+    """Name a configured job; never read the customer's own sentence back as a job name."""
+    found = business.job(job_type)
+    if found:
+        return f"{found.label} — I'll put that on the job."
+    return "Got it, I'll put that on the job."
+
+
 def _label(value: str) -> str:
     text = str(value).strip()
     if not text:
@@ -500,7 +631,8 @@ def _user_turns(history: list[dict]) -> int:
 def _clean_str(value: object) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    # Gemini sometimes writes "–" as the literal text "\u2013" inside tool arguments.
+    text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(value)).strip()
     if not text or text.casefold() in {"null", "none", "undefined", "nil", "n/a"}:
         return None
     return text
@@ -524,6 +656,8 @@ def _gemini_tool():
             schema["type"] = "boolean"
         elif spec.get("type") == "string":
             schema["type"] = "string"
+            if spec.get("enum"):
+                schema["enum"] = list(spec["enum"])
         else:
             schema["type"] = "string"
             schema["nullable"] = True

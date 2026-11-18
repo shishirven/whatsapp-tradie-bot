@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from app.business import Business, load_business
 from app.extract import extract_facts, extract_job_type, extract_name, extract_preferred_time, extract_suburb, extract_urgency
 from app.scoring import merge_facts
+from app.hazards import is_hazard
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
@@ -487,6 +488,8 @@ def issue_core(text: str) -> str | None:
 
 
 def looks_like_problem(text: str, business: Business | None = None) -> bool:
+    if is_hazard(text):
+        return True
     if issue_core(text):
         return True
     lowered = (text or "").casefold()
@@ -783,8 +786,11 @@ def _join_question(model_reply: str, question: str | None, additions: dict, busi
 def _acknowledgement(facts: dict, business: Business) -> str:
     job = facts.get("job_type")
     if job:
-        label = business.job_label(job) or _cap(str(job))
-        return f"{label} — I'll put that on the job."
+        found = business.job(job)
+        if found:
+            return f"{found.label} — I'll put that on the job."
+        # Not a configured job: don't read the customer's sentence back to them.
+        return "Got it, I'll put that on the job."
     description = facts.get("description")
     if description:
         return f"{_cap(str(description))} — I've got that."

@@ -11,3 +11,8 @@ google-auth>=2.35
 requests>=2.32
 pytest>=8.0
 PyYAML>=6.0
+# Tracing. Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see app/telemetry.py).
+opentelemetry-sdk>=1.45,<2
+opentelemetry-exporter-otlp-proto-http>=1.45,<2
+# Uploads llm_calls to S3 when LOG_BUCKET is set (see app/log_shipper.py).
+boto3>=1.44,<2

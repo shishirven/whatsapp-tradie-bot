@@ -20,6 +20,8 @@ from app.business import load_business
 from app.config import Settings
 from app.customers_io import ImportResult, import_csv_text
 from app.db import Database
+from app.log_shipper import LogShipper
+from app.telemetry import setup_logging, setup_tracing
 from app.llm import AnthropicQualifier, GeminiQualifier, MissingKeyQualifier, RuleBasedQualifier
 from app.media import (
     GraphMediaDownloader,
@@ -34,7 +36,8 @@ from app.messaging import (
     parse_webhook,
     verify_meta_signature,
 )
-from app.notify import LogNotifier
+from app.notify import LogNotifier, WhatsAppOwnerNotifier
+from app.phones import normalise_au_phone
 from app.routing import JOB_STATUSES, build_intent
 from app.service import (
     HANDOFF_LABELS,
@@ -163,12 +166,14 @@ def create_app(
     intent=None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    setup_logging()
+    setup_tracing()
     clock = now or (lambda: datetime.now(timezone.utc))
     business = business or load_business(settings.business_config_path or None)
     db = Database(settings.sqlite_path, clock=clock)
     qualifier = qualifier if qualifier is not None else build_qualifier(settings, business)
     gateway = gateway if gateway is not None else build_gateway(settings)
-    notifier = notifier if notifier is not None else LogNotifier()
+    notifier = notifier if notifier is not None else build_notifier(settings, gateway)
     calendar = calendar if calendar is not None else build_calendar(settings, db)
     media_downloader = media_downloader if media_downloader is not None else build_media(settings)
     transcriber = transcriber if transcriber is not None else build_transcriber(settings)
@@ -179,6 +184,9 @@ def create_app(
         gemini_api_key=settings.gemini_api_key,
         gemini_model=settings.gemini_model,
     )
+
+    if settings.log_bucket:
+        LogShipper(db, settings.log_bucket, interval=settings.log_ship_interval).start()
 
     app = FastAPI(title=APP_NAME, docs_url="/docs")
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
@@ -604,7 +612,13 @@ def create_app(
 
         processed = 0
         duplicates = 0
+        owner_messages = 0
         for inbound in parse_webhook(payload):
+            if is_owner_number(settings, inbound.wa_id):
+                # The owner replying to an alert (or opening the 24-hour window) is not a customer.
+                logger.info("message from the owner's number; no customer reply sent")
+                owner_messages += 1
+                continue
             result = handle_incoming(
                 db,
                 qualifier,
@@ -622,9 +636,36 @@ def create_app(
                 duplicates += 1
             else:
                 processed += 1
-        return {"status": "ok", "processed": processed, "duplicates": duplicates}
+        return {"status": "ok", "processed": processed, "duplicates": duplicates, "owner": owner_messages}
 
     return app
+
+
+def build_notifier(settings: Settings, gateway):
+    """WhatsApp alerts to the owner when OWNER_WHATSAPP is set; otherwise log lines only."""
+    owner = normalise_au_phone(settings.owner_whatsapp) if settings.owner_whatsapp else None
+    if not owner:
+        logger.warning("OWNER_WHATSAPP is empty; owner alerts are log lines only")
+        return LogNotifier()
+    if not settings.owner_alert_template:
+        logger.warning(
+            "OWNER_ALERT_TEMPLATE is empty; owner alerts use free text, which only delivers "
+            "within 24 hours of the owner messaging the business number"
+        )
+    return WhatsAppOwnerNotifier(
+        gateway,
+        owner,
+        template=settings.owner_alert_template or None,
+        language=settings.owner_alert_language,
+        base_url=settings.public_base_url or None,
+    )
+
+
+def is_owner_number(settings: Settings, wa_id: str | None) -> bool:
+    owner = normalise_au_phone(settings.owner_whatsapp) if settings.owner_whatsapp else None
+    # WhatsApp sends the sender as international digits with no "+", for every country.
+    sender = "".join(ch for ch in str(wa_id or "") if ch.isdigit())
+    return bool(owner) and sender == owner
 
 
 def _cookie_secure(request: Request) -> bool:
