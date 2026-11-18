@@ -5,10 +5,16 @@ and stays as written. This set is different. It holds short conversations that e
 one behaviour, most of them taken from bugs found in live use, with code checks on both
 the reply and what was stored on the job:
 
-    python -m evals.regression                 # offline always; live Gemini too if GEMINI_API_KEY is set
+    python -m evals.regression                 # all cases offline; live Gemini on a random 10 if GEMINI_API_KEY is set
     python -m evals.regression --offline       # offline only (what CI runs)
     python -m evals.regression --category nonsense_first_message
     python -m evals.regression --case A1 --repeats 3 --rpm 5
+    python -m evals.regression --sample 0      # live on every case (about 100 model calls)
+    python -m evals.regression --seed 42       # repeat an earlier live sample exactly
+
+Live runs cost model calls, so by default they cover a random sample of LIVE_SAMPLE cases,
+spread across the categories (one from each, then extras at random). The seed is printed
+and saved in the report, so a sample can be run again. Offline runs every case; it's free.
 
 Each conversation runs through the real app the way the simulator does: Riley greets first,
 then each customer message in turn. Offline uses the keyword qualifier. Live uses Gemini;
@@ -26,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import time
@@ -39,6 +46,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "regression_set.yaml"
 BUSINESS_PATH = ROOT / "fixtures" / "regression_business.json"
+
+LIVE_SAMPLE = 10
 
 CATEGORIES = {
     "nonsense_first_message": "A. Nonsense first message",
@@ -367,6 +376,8 @@ def run(
     repeats: int = 1,
     rpm: int | None = None,
     results_dir: str | Path = "evals/results",
+    sample: int = LIVE_SAMPLE,
+    seed: int | None = None,
 ) -> dict:
     business = load_business()
     cases = [
@@ -376,12 +387,17 @@ def run(
     api_key = "" if offline_only else os.getenv("GEMINI_API_KEY", "").strip()
     model = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
     modes = ["offline"] + (["live"] if api_key else [])
+    seed = seed if seed is not None else random.randrange(1, 10**6)
+    live_ids = {case["id"] for case in sample_live(cases, sample, seed)} if api_key else set()
     rows = []
     for case in cases:
         row = {"id": case["id"], "category": case["category"], "why": case["why"], "modes": {}}
         for mode in modes:
             if mode == "live" and is_scripted(case):
                 row["modes"][mode] = {"verdict": "replayed", "runs": []}
+                continue
+            if mode == "live" and case["id"] not in live_ids:
+                row["modes"][mode] = {"verdict": "not sampled", "runs": []}
                 continue
             runs = [
                 run_case(case, mode=mode, business=business, api_key=api_key, model=model, rpm=rpm)
@@ -390,9 +406,35 @@ def run(
             row["modes"][mode] = {"verdict": _verdict(runs), "runs": runs}
         rows.append(row)
     report = {"modes": modes, "repeats": repeats, "model": model if api_key else None, "cases": rows,
-              "summary": _summary(rows, modes)}
+              "summary": _summary(rows, modes), "seed": seed if api_key else None,
+              "live_sample": sorted(live_ids)}
     _write(report, Path(results_dir))
     return report
+
+
+def sample_live(cases: list[dict], size: int, seed: int) -> list[dict]:
+    """A random sample for live runs: one case per category first, then extras at random.
+
+    Replayed cases (with a recorded `model:` output) never call a model, so they're left out.
+    `size` 0 or less means every live-eligible case.
+    """
+    eligible = [case for case in cases if not is_scripted(case)]
+    if size <= 0 or size >= len(eligible):
+        return eligible
+    rng = random.Random(seed)
+    by_category: dict[str, list[dict]] = defaultdict(list)
+    for case in eligible:
+        by_category[case["category"]].append(case)
+    for group in by_category.values():
+        rng.shuffle(group)
+    order = list(by_category)
+    rng.shuffle(order)
+    picked: list[dict] = []
+    while len(picked) < size:
+        for category in order:
+            if by_category[category] and len(picked) < size:
+                picked.append(by_category[category].pop())
+    return picked
 
 
 def _verdict(runs: list[dict]) -> str:
@@ -412,6 +454,8 @@ def _summary(rows: list[dict], modes: list[str]) -> dict:
         by_category: dict[str, Counter] = defaultdict(Counter)
         for row in rows:
             verdict = row["modes"][mode]["verdict"]
+            if verdict == "not sampled":
+                continue
             by_category[row["category"]][verdict] += 1
         total = Counter()
         for counts in by_category.values():
@@ -431,7 +475,10 @@ def render_markdown(report: dict) -> str:
     for mode in report["modes"]:
         total = report["summary"][mode]["total"]
         counted = sum(value for key, value in total.items() if key != "replayed")
-        label = f"{mode} ({report['model']})" if mode == "live" else mode
+        label = (
+            f"live ({report['model']}, {len(report['live_sample'])} sampled, seed {report['seed']})"
+            if mode == "live" else mode
+        )
         lines.append(f"**{label}:** {total.get('pass', 0)}/{counted} pass"
                      + "".join(f", {total[key]} {key}" for key in ("fail", "unstable", "fallback") if total.get(key)))
     lines += ["", "| Category | " + " | ".join(report["modes"]) + " |", "| --- |" + " --- |" * len(report["modes"])]
@@ -475,11 +522,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case", help="Only this case id, e.g. A1.")
     parser.add_argument("--repeats", type=int, default=1, help="Live runs per case; flips are 'unstable'.")
     parser.add_argument("--rpm", type=int, default=0, help="Max Gemini calls per minute (5 on the free tier).")
+    parser.add_argument("--sample", type=int, default=LIVE_SAMPLE,
+                        help=f"Live cases to sample at random (default {LIVE_SAMPLE}); 0 runs every case.")
+    parser.add_argument("--seed", type=int, help="Seed for the live sample, to repeat an earlier one.")
     parser.add_argument("--results-dir", default="evals/results")
     args = parser.parse_args(argv)
     report = run(
         offline_only=args.offline, category=args.category, case_id=args.case,
         repeats=max(1, args.repeats), rpm=args.rpm or None, results_dir=args.results_dir,
+        sample=args.sample, seed=args.seed,
     )
     print(render_markdown(report))
     print(f"Wrote {args.results_dir}/regression_latest.json and regression_latest.md")

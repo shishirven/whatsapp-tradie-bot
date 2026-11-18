@@ -282,11 +282,13 @@ A turn with a `model:` block replays a recorded Gemini output (such as `\u2013` 
 
 ```bash
 python -m evals.regression --offline                  # what CI runs (also via pytest)
-python -m evals.regression                            # adds live Gemini when GEMINI_API_KEY is set
+python -m evals.regression                            # adds live Gemini on a random 10 when GEMINI_API_KEY is set
+python -m evals.regression --seed 42                  # repeat an earlier live sample exactly
+python -m evals.regression --sample 0                 # live on every case (about 100 model calls)
 python -m evals.regression --category vague_request --repeats 3 --rpm 5
 ```
 
-Live results are reported per category as pass, fail, unstable (the verdict flipped between repeats) or fallback (Gemini failed and the offline qualifier answered). The report is written to `evals/results/regression_latest.md`. When a real conversation goes wrong, add it as a case.
+Offline runs every case. Live runs cost model calls, so by default they use a random sample of 10 cases spread across the categories: one from each category, then extras at random. Replayed cases never call a model and are left out of the sample. The seed is printed and saved in the report. Live results are reported per category as pass, fail, unstable (the verdict flipped between repeats) or fallback (Gemini failed and the offline qualifier answered). The report is written to `evals/results/regression_latest.md`. When a real conversation goes wrong, add it as a case.
 
 ## Render
 
