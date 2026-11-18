@@ -39,7 +39,15 @@ from app.booking import (
 from app.business import Business, load_business
 from app.db import Database
 from app.clarity import Assessment, assess, clarify_reply, menu_choice, strict_facts
-from app.intake import apply_intake, asked_fields, delivered_intake, next_question, question_for, render_reply
+from app.intake import (
+    apply_intake,
+    asked_fields,
+    delivered_intake,
+    is_non_answer,
+    next_question,
+    question_for,
+    render_reply,
+)
 from app.hazards import classify_hazard
 from app.llm import TurnContext
 from app.llm_log import prompt_version, record_turn
@@ -101,6 +109,7 @@ def build_system(
     *,
     saved_address: str | None = None,
     established: bool = False,
+    continuing: bool = False,
 ) -> str:
     business = business or load_business()
     if established and saved_address:
@@ -134,12 +143,21 @@ def build_system(
     else:
         ad_line = "No ad context. The customer opened the chat directly."
     who = profile_name or "unknown"
+    continuing_line = (
+        "\nYou are already mid-conversation with this customer and have introduced yourself. "
+        "This is a new job in the same chat. Do not greet them or introduce yourself again. "
+        "If they have not said what the new job is, ask what needs doing.\n"
+        if continuing
+        else ""
+    )
     return f"""You are {business.assistant_name}, the WhatsApp assistant for {business.name}, a {business.trade} serving {business.area_name}.
 
 You take job details for the desk. Be brief and specific, like a person typing in WhatsApp. Ask at most one question per message.
 
 Rules:
 - Collect job type, suburb, urgency, a short description, preferred time, and the customer's name. Do not ask for a fact already on file.
+- While the job type is unknown, ask what needs doing before anything else.
+- If an answer is a joke, rude, or plainly not an answer, do not store it. Ask the same thing once more in a friendly way, then move on.
 - A short or loosely worded answer still counts for the fact you just asked about. "wiring is the issue" means the problem is wiring. Store it and ask only for the next missing detail.
 - Never ask again for a fact that is already filled in. If you truly cannot tell what they mean, ask one different, more specific question, then move on with what you have. Do not repeat the same question.
 - Set intent on every turn. If you can't tell what electrical work they need (gibberish, too vague, or work for another trade), do not guess a job type, suburb or description from that message: set intent to unclear, vague_request or not_electrical and put one short question in clarifying_question.
@@ -155,7 +173,7 @@ Rules:
 Ad context: {ad_line}
 
 {relationship}
-
+{continuing_line}
 {guardrail_block(business)}
 
 Facts already on file (JSON): {json.dumps(known, default=str)}
@@ -471,6 +489,7 @@ def _handle_incoming(
             business,
             saved_address=saved_address,
             established=established,
+            continuing=route == "another",
         ),
         intake=intake_before,
     )
@@ -518,7 +537,7 @@ def _handle_incoming(
     # Is this a clear request for electrical work? If not, ask instead of guessing (app/clarity.py).
     clarity = _clarify(
         draft, text=text, known=known, history=history, business=business, intake=intake_before,
-        handled=bool(decision.replacement), booked=bool(booked_reply),
+        handled=bool(decision.replacement), booked=bool(booked_reply), opened_new_job=route == "another",
     )
     facts, reply, intake_after, intake_prompt = _apply_draft(
         clarity.draft,
@@ -539,6 +558,8 @@ def _handle_incoming(
     if clarity.handoff and not handoff:
         handoff, handoff_reason = True, "unclear_request"
     quote = draft_quote(business, facts.get("job_type"), quote or None)
+    if route == "another":
+        reply = _drop_reintroduction(reply, business)
     reply = scrub_prices(reply) or _APOLOGY
     if facts.get("urgency") == "emergency" and "000" not in reply:
         reply = f"{_SAFETY} {reply}"
@@ -1062,7 +1083,9 @@ class _Clarity:
     menu: list[str] = field(default_factory=list)
 
 
-def _clarify(draft, *, text, known, history, business, intake, handled: bool, booked: bool) -> _Clarity:
+def _clarify(
+    draft, *, text, known, history, business, intake, handled: bool, booked: bool, opened_new_job: bool = False,
+) -> _Clarity:
     """Decide the message's intent; for an unclear one, swap in a clarifying question.
 
     Unclear, vague and non-electrical messages store nothing a strict reader can't confirm,
@@ -1075,6 +1098,7 @@ def _clarify(draft, *, text, known, history, business, intake, handled: bool, bo
     assessment = assess(
         text, model_intent=draft.intent, known=known, pending=pending, business=business,
         handled=handled, booked=booked, menu_choice=picked, wants_person=person,
+        opened_new_job=opened_new_job,
     )
     keys = ("job_type", "suburb", "urgency", "description", "preferred_time", "contact_name")
     if picked:
@@ -1310,16 +1334,51 @@ def _starts_another_job(db, intent, lead, text, booking, moment) -> bool:
     """True when an open job should stay put and this message starts a new one."""
     if not text or not db.job_has_inbound(lead["id"]):
         return False
+    # A job with no job type is still being described, so whatever the
+    # customer says next is an answer for this job, not a new one.
+    if not lead.get("job_type"):
+        return False
     if wants_human(text) or is_status_question(text):
         return False
     slots = offered_slots(booking, moment)
     if slots and match_slot(text, slots) is not None:
         return False
+    if is_non_answer(text):
+        return False
+    asked = _last_bot_message(db, lead["id"])
+    says_new_job = KeywordIntentClassifier().classify(text)
+    if asked and "?" in asked and len(text.split()) <= 4 and not says_new_job:
+        # A short reply straight after our question is the answer to it.
+        return False
+    summary = job_summary(lead)
+    if asked:
+        summary = f"{summary}\nLast message we sent: {asked}"
     try:
-        return bool(intent.classify(text, job_summary=job_summary(lead)))
+        return bool(intent.classify(text, job_summary=summary))
     except Exception:
         logger.exception("intent classify failed for job %s", lead.get("id"))
         return False
+
+
+def _last_bot_message(db: Database, job_id: int) -> str | None:
+    for message in reversed(db.list_messages(job_id=job_id)):
+        if message["direction"] == "out":
+            return (message.get("body") or "").strip() or None
+    return None
+
+
+_GREETING = re.compile(r"^(?:hi|hello|hey|g'?day)\b[^.!?]*[.!?]?$", re.IGNORECASE)
+
+
+def _drop_reintroduction(reply: str, business: Business) -> str:
+    """Remove a fresh 'Hi X, I'm Riley' opener from a reply mid-conversation."""
+    parts = re.split(r"(?<=[.!?])\s+", (reply or "").strip())
+    intro = f"i'm {business.assistant_name}".casefold()
+    kept = [
+        part for part in parts
+        if not _GREETING.match(part.strip()) and intro not in part.casefold()
+    ]
+    return " ".join(kept).strip() or reply
 
 
 def _prefill_known(customer: dict | None, business: Business) -> tuple[dict, str | None]:

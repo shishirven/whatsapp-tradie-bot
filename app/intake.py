@@ -509,10 +509,43 @@ def looks_like_problem(text: str, business: Business | None = None) -> bool:
     return False
 
 
+_BRUSH_OFF = re.compile(
+    r"\b(?:"
+    r"(?:your|ur|yo) (?:mom|mum|mam|ma|momma|mommas?|moms|mums|mother)'?s?"
+    r"|none of (?:your|ur) (?:business|concern)"
+    r"|mind (?:your|ur) own"
+    r"|not telling|won'?t tell|wouldn'?t you like to know"
+    r"|why do you (?:need|want) to know"
+    r"|f+ off|piss off|go away|shut up|get lost|bugger off|rack off"
+    r")\b",
+    re.IGNORECASE,
+)
+_LAUGH_ONLY = re.compile(
+    r"^(?:\s|[!?.,])*(?:(?:lol|lmao|rofl|ha(?:ha)+h?|he(?:he)+|jk|just (?:kidding|joking))(?:\s|[!?.,])*)+$",
+    re.IGNORECASE,
+)
+
+
+def is_non_answer(text: str | None) -> bool:
+    """True for a joke, a brush-off, or abuse given instead of an answer.
+
+    Laughter only counts when it is the whole message. A brush-off phrase only
+    counts in a short reply, so a real description that mentions one is kept.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if _LAUGH_ONLY.match(cleaned):
+        return True
+    return len(cleaned.split()) <= 8 and bool(_BRUSH_OFF.search(cleaned))
+
+
 def is_unclear(text: str | None) -> bool:
     """True when the reply does not name a thing we can store."""
     cleaned = _norm(text)
     if not cleaned:
+        return True
+    if is_non_answer(cleaned):
         return True
     if not re.search(r"[a-z0-9]", cleaned):
         return True

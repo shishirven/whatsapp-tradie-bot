@@ -83,7 +83,9 @@ _INTENT_SYSTEM = (
     "an open job. Reply with exactly YES if the customer is clearly asking to "
     "start a different or new job, separate from the open one. Reply with "
     "exactly NO if they are adding detail, sending a photo or voice note, "
-    "choosing a time, asking for a person, or asking for status. No other words."
+    "choosing a time, asking for a person, or asking for status. "
+    "If the message answers the last message we sent, even vaguely, jokingly, "
+    "or rudely, reply NO. When unsure, reply NO. No other words."
 )
 
 

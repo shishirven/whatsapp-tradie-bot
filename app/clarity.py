@@ -111,6 +111,7 @@ def assess(
     booked: bool = False,
     menu_choice: str | None = None,
     wants_person: bool = False,
+    opened_new_job: bool = False,
 ) -> Assessment:
     """The final intent for one message, with deterministic evidence first, then the model, then rules.
 
@@ -119,7 +120,7 @@ def assess(
     """
     evidence = evidence_intent(
         text, known=known, pending=pending, business=business, handled=handled, booked=booked,
-        menu_choice=menu_choice, wants_person=wants_person,
+        menu_choice=menu_choice, wants_person=wants_person, opened_new_job=opened_new_job,
     )
     if evidence:
         intent, source = evidence, "evidence"
@@ -152,6 +153,7 @@ def evidence_intent(
     booked: bool = False,
     menu_choice: str | None = None,
     wants_person: bool = False,
+    opened_new_job: bool = False,
 ) -> str | None:
     """Deterministic signs that a message is clear. None when there are none."""
     raw = (text or "").strip()
@@ -168,6 +170,9 @@ def evidence_intent(
         return "service_request"
     if handled or wants_person:
         return "question"
+    if opened_new_job:
+        # "I've got another job for you": routing already opened a new job and the model asks what it is.
+        return "follow_up"
     if _VISIT.search(lowered) or _CANCEL.search(lowered):
         return "question"
     if "suburb" in pending and _configured_suburb(raw, business) and len(lowered.split()) <= 4:
