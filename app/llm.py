@@ -22,6 +22,7 @@ import anthropic
 
 from app.business import Business, load_business
 from app.extract import extract_facts
+from app.clarity import INTENTS
 from app.hazards import MODEL_HAZARDS, classify_hazard, hazard_from_kind
 from app.intake import apply_intake, normalise_intake
 from app.scoring import canonical_facts, merge_facts, wants_human
@@ -91,6 +92,28 @@ QUALIFY_TOOL = {
                     "When unsure between none and a hazard, choose the hazard."
                 ),
             },
+            "intent": {
+                "type": "string",
+                "enum": list(INTENTS),
+                "description": (
+                    "What the customer's latest message is, judged against the whole conversation. "
+                    "service_request: they describe electrical work or a fault. "
+                    "answer: they answer the question you just asked (a suburb, a number, a name, yes/no). "
+                    "question: a question or request about the business, a price or a visit time. "
+                    "follow_up: about a job already on file. greeting: hello, thanks, ok. "
+                    "vague_request: they want an electrician but not what for. "
+                    "unclear: you can't tell what they mean (gibberish, a typo, a lone word or symbol). "
+                    "not_electrical: work for another trade, or nothing to do with an electrician. "
+                    "Never guess a job type or suburb from an unclear message."
+                ),
+            },
+            "clarifying_question": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": (
+                    "Only when intent is vague_request, unclear or not_electrical: one short, friendly "
+                    "question that helps them say what electrical work they need. Otherwise null."
+                ),
+            },
             "description": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
                 "description": (
@@ -114,6 +137,8 @@ QUALIFY_TOOL = {
             "suburb",
             "urgency",
             "hazard",
+            "intent",
+            "clarifying_question",
             "description",
             "preferred_time",
             "contact_name",
@@ -153,6 +178,8 @@ class QualificationDraft:
     preferred_time: str | None = None
     contact_name: str | None = None
     hazard: str | None = None
+    intent: str | None = None
+    clarifying_question: str | None = None
     raw: dict | None = None
     meta: CallMeta | None = None
     intake: dict | None = None
@@ -521,8 +548,15 @@ def _draft_from_tool(data: dict, texts: list[str]) -> QualificationDraft:
         preferred_time=_clean_str(data.get("preferred_time")),
         contact_name=_clean_str(data.get("contact_name")),
         hazard=_clean_hazard(data.get("hazard")),
+        intent=_clean_intent(data.get("intent")),
+        clarifying_question=_clean_str(data.get("clarifying_question")),
         raw=data,
     )
+
+
+def _clean_intent(value) -> str | None:
+    text = value.strip().casefold() if isinstance(value, str) else ""
+    return text if text in INTENTS else None
 
 
 def _clean_hazard(value) -> str | None:

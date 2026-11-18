@@ -19,6 +19,8 @@ import logging
 import re
 import secrets
 import time
+from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +38,8 @@ from app.booking import (
 )
 from app.business import Business, load_business
 from app.db import Database
-from app.intake import apply_intake, delivered_intake, render_reply
+from app.clarity import Assessment, assess, clarify_reply, menu_choice, strict_facts
+from app.intake import apply_intake, asked_fields, delivered_intake, next_question, question_for, render_reply
 from app.hazards import classify_hazard
 from app.llm import TurnContext
 from app.llm_log import prompt_version, record_turn
@@ -139,6 +142,7 @@ Rules:
 - Collect job type, suburb, urgency, a short description, preferred time, and the customer's name. Do not ask for a fact already on file.
 - A short or loosely worded answer still counts for the fact you just asked about. "wiring is the issue" means the problem is wiring. Store it and ask only for the next missing detail.
 - Never ask again for a fact that is already filled in. If you truly cannot tell what they mean, ask one different, more specific question, then move on with what you have. Do not repeat the same question.
+- Set intent on every turn. If you can't tell what electrical work they need (gibberish, too vague, or work for another trade), do not guess a job type, suburb or description from that message: set intent to unclear, vague_request or not_electrical and put one short question in clarifying_question.
 - Urgency is one of emergency, urgent, or planned.
 - If the suburb is outside the service area, say so and that a person can refer them. Still record the suburb.
 - If someone may be in danger, or they report burning, smoke, or a shock, tell them to call 000 first, then keep the job details.
@@ -510,14 +514,20 @@ def _handle_incoming(
         )
 
     latency_ms = int(round((time.monotonic() - started) * 1000))
+    decision = apply_policy(text or "", business, model_hazard=draft.hazard)
+    # Is this a clear request for electrical work? If not, ask instead of guessing (app/clarity.py).
+    clarity = _clarify(
+        draft, text=text, known=known, history=history, business=business, intake=intake_before,
+        handled=bool(decision.replacement), booked=bool(booked_reply),
+    )
     facts, reply, intake_after, intake_prompt = _apply_draft(
-        draft,
+        clarity.draft,
         text=text,
         known=known,
         history=history,
         business=business,
         intake_before=intake_before,
-        skip=bool(booked_reply) or wants_human(text) or bool(draft.request_human),
+        skip=clarity.skip or bool(booked_reply) or wants_human(text) or bool(draft.request_human),
     )
     # A hazard from the rules or the model's `hazard` field raises urgency before scoring.
     urgency = hazard_urgency(facts.get("urgency"), resolve_hazard(text, draft.hazard, log=False))
@@ -526,6 +536,8 @@ def _handle_incoming(
     score = score_lead(facts, business)
     asked = bool(draft.request_human) or wants_human(text)
     handoff, handoff_reason = handoff_decision(score, asked)
+    if clarity.handoff and not handoff:
+        handoff, handoff_reason = True, "unclear_request"
     quote = draft_quote(business, facts.get("job_type"), quote or None)
     reply = scrub_prices(reply) or _APOLOGY
     if facts.get("urgency") == "emergency" and "000" not in reply:
@@ -540,7 +552,7 @@ def _handle_incoming(
     elif booked_reply:
         # The booking line already confirms the time; keep only the model's next question.
         reply = f"{booked_reply} {_questions_only(reply)}".strip()
-    elif _should_offer(facts, booking, business, moment):
+    elif not clarity.assessment.clarify and _should_offer(facts, booking, business, moment):
         slots = available_slots(business, calendar, moment) if calendar is not None else []
         if slots:
             booking = booking_from_slots(slots)
@@ -548,7 +560,6 @@ def _handle_incoming(
     if handoff:
         reply = with_handoff_line(reply, business)
     reply = scrub_prices(_with_opening(opening, reply)) or _APOLOGY
-    decision = apply_policy(text or "", business, model_hazard=draft.hazard)
     if decision.replacement:
         # Configured amounts are allowed through. The scrubber above already
         # removed any figure the model invented on its own.
@@ -578,6 +589,7 @@ def _handle_incoming(
     if intake_prompt and intake_prompt not in reply:
         intake_after = intake_before
     intake_after = delivered_intake(intake_before, intake_after, reply)
+    intake_after = _with_clarity_state(intake_after, clarity)
 
     saved = _save(
         db, business, conversation, lead, photos, voice_notes, booking, quote,
@@ -604,6 +616,7 @@ def _handle_incoming(
         draft=draft,
         latency_ms=latency_ms,
         decision=decision,
+        rule=clarity.rule,
         rule_hazard=classify_hazard(text),
         sent_reply=reply,
         urgency=facts.get("urgency"),
@@ -1036,6 +1049,112 @@ def _cancel_reply(text: str, business: Business, calendar: Calendar | None, mome
     return f"No problem, I've cancelled {when}."
 
 
+@dataclass
+class _Clarity:
+    """What the clarity step decided for one turn."""
+
+    draft: object
+    assessment: Assessment
+    skip: bool = False
+    handoff: bool = False
+    rule: str | None = None
+    streak: int = 0
+    menu: list[str] = field(default_factory=list)
+
+
+def _clarify(draft, *, text, known, history, business, intake, handled: bool, booked: bool) -> _Clarity:
+    """Decide the message's intent; for an unclear one, swap in a clarifying question.
+
+    Unclear, vague and non-electrical messages store nothing a strict reader can't confirm,
+    and skip the loose intake reader, so "hha" can never become a job type or a suburb.
+    """
+    last_question = _last_assistant_message(history)
+    pending = asked_fields(last_question)
+    picked = menu_choice(text, (intake or {}).get("job_menu"))
+    person = wants_human(text) or bool(draft.request_human)
+    assessment = assess(
+        text, model_intent=draft.intent, known=known, pending=pending, business=business,
+        handled=handled, booked=booked, menu_choice=picked, wants_person=person,
+    )
+    keys = ("job_type", "suburb", "urgency", "description", "preferred_time", "contact_name")
+    if picked:
+        # A number from the job menu: confirm the job and ask the next question; "2" is not read as anything else.
+        merged = canonical_facts(merge_facts(known, {"job_type": picked}), business)
+        follow = next_question(merged, intake)
+        label = business.job_label(picked) or picked
+        reply = f"{label} — I'll put that on the job." + (f" {follow}" if follow else "")
+        chosen = dc_replace(
+            draft, reply=reply, intake=None, intake_prompt=None, intent="answer",
+            **{key: (picked if key == "job_type" else None) for key in keys},
+        )
+        return _Clarity(draft=chosen, assessment=assessment, skip=True)
+    if assessment.clarify:
+        previous = int((intake or {}).get("clarify_streak") or 0)
+        streak = previous if assessment.intent == "not_electrical" else previous + 1
+        pending_question = question_for(pending[0]) if pending else next_question(known, intake)
+        question, menu, handoff = clarify_reply(
+            assessment.intent, business=business, known=known, pending_question=pending_question,
+            model_question=draft.clarifying_question, streak=streak,
+        )
+        kept = {} if assessment.intent == "unclear" else strict_facts(text, business)
+        asked = dc_replace(
+            draft, reply=question, intake=None, intake_prompt=None, request_human=False,
+            **{key: kept.get(key) for key in keys},
+        )
+        return _Clarity(
+            draft=asked, assessment=assessment, skip=True, handoff=handoff,
+            rule=f"clarify:{assessment.intent}", streak=streak, menu=menu,
+        )
+    if assessment.strict:
+        kept = strict_facts(text, business)
+        reply = _without_unkept_acknowledgements((draft.reply or "").strip(), kept)
+        follow = next_question(canonical_facts(merge_facts(known, kept), business), intake)
+        if draft.intake is not None:
+            # The offline reader built its question around the loose reading just discarded; ask again from what was kept.
+            statements = [part for part in re.split(r"(?<=[.!?])\s+", reply) if part and not part.endswith("?")]
+            reply = " ".join(statements + ([follow] if follow else []))
+        elif "?" not in reply and follow:
+            reply = f"{reply} {follow}".strip()
+        plain = dc_replace(
+            draft, reply=reply, intake=None, intake_prompt=None, **{key: kept.get(key) for key in keys},
+        )
+        return _Clarity(draft=plain, assessment=assessment, skip=True)
+    return _Clarity(draft=draft, assessment=assessment)
+
+
+def _without_unkept_acknowledgements(reply: str, kept: dict) -> str:
+    """Drop "I'll put that on the job" or "X is outside the area" when that fact wasn't stored."""
+    sentences = re.split(r"(?<=[.!?])\s+", reply)
+    keep = []
+    for sentence in sentences:
+        if "put that on the job" in sentence and not kept.get("job_type"):
+            continue
+        if "outside the area we cover" in sentence and not kept.get("suburb"):
+            continue
+        if sentence.startswith("I'll note it so someone can refer you") and not kept.get("suburb"):
+            continue
+        keep.append(sentence)
+    return " ".join(keep).strip()
+
+
+def _with_clarity_state(intake: dict, clarity: _Clarity) -> dict:
+    """Remember how many unclear messages in a row there have been, and an open job menu."""
+    state = {key: value for key, value in (intake or {}).items() if key not in ("clarify_streak", "job_menu")}
+    if clarity.assessment.clarify and not clarity.handoff:
+        if clarity.streak:
+            state["clarify_streak"] = clarity.streak
+        if clarity.menu:
+            state["job_menu"] = list(clarity.menu)
+    return state
+
+
+def _last_assistant_message(history: list[dict]) -> str:
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            return str(item.get("content") or "")
+    return ""
+
+
 def _prompt_version(business: Business) -> str:
     """Id of the prompt template, business config and tool schema, without any customer's facts."""
     empty = {key: None for key in FACT_KEYS}
@@ -1128,10 +1247,17 @@ def _intake_of(lead: dict) -> dict:
     intake = raw.get("intake")
     if not isinstance(intake, dict):
         return {"probed": [], "waived": []}
-    return {
+    state = {
         "probed": [item for item in intake.get("probed") or [] if isinstance(item, str)],
         "waived": [item for item in intake.get("waived") or [] if isinstance(item, str)],
     }
+    streak = intake.get("clarify_streak")
+    if isinstance(streak, int) and not isinstance(streak, bool) and streak > 0:
+        state["clarify_streak"] = streak
+    menu = intake.get("job_menu")
+    if isinstance(menu, list) and all(isinstance(item, str) for item in menu) and menu:
+        state["job_menu"] = list(menu)
+    return state
 
 
 def _save(
