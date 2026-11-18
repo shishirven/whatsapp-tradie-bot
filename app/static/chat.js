@@ -13,7 +13,7 @@ let conversationId = null;
 let messages = [];
 let busy = false;
 
-document.querySelectorAll(".ad-card").forEach((button) => {
+document.querySelectorAll(".source-card").forEach((button) => {
   button.addEventListener("click", () => startChat(button));
 });
 
@@ -25,10 +25,10 @@ composer.addEventListener("submit", (event) => {
 async function startChat(button) {
   if (busy) return;
   busy = true;
-  document.querySelectorAll(".ad-card").forEach((card) => card.classList.remove("selected"));
+  document.querySelectorAll(".source-card").forEach((card) => card.classList.remove("selected"));
   button.classList.add("selected");
   const profile = document.getElementById("profile-name").value.trim();
-  const adId = button.dataset.adId || null;
+  const adId = button.dataset.sourceId || null;
   try {
     const data = await postJson("/api/conversations", {
       ad_id: adId,

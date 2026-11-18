@@ -95,9 +95,9 @@ nav a[aria-current="page"] { text-decoration: underline; text-underline-offset: 
   padding: 0.55rem 0.7rem;
 }
 
-.ad-list { overflow: auto; padding: 0 0.75rem 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.source-list { overflow: auto; padding: 0 0.75rem 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
 
-.ad-card {
+.source-card {
   text-align: left;
   border: 1px solid var(--line);
   background: #f7fbfa;
@@ -109,11 +109,11 @@ nav a[aria-current="page"] { text-decoration: underline; text-underline-offset: 
   gap: 0.15rem;
 }
 
-.ad-card:hover, .ad-card.selected { border-color: var(--green-2); background: #e7f6f3; }
+.source-card:hover, .source-card.selected { border-color: var(--green-2); background: #e7f6f3; }
 
-.ad-source, .ad-campaign { color: var(--muted); font-size: 0.75rem; text-transform: capitalize; }
+.source-channel, .source-campaign { color: var(--muted); font-size: 0.75rem; text-transform: capitalize; }
 
-.ad-campaign { text-transform: none; }
+.source-campaign { text-transform: none; }
 
 .banner { padding: 0.75rem 1rem 1rem; margin: 0; }
 

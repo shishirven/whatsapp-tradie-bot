@@ -61,6 +61,7 @@ def record_turn(
     latency_ms: int | None = None,
     decision=None,
     rule_hazard=None,
+    rule: str | None = None,
     sent_reply: str | None = None,
     urgency: str | None = None,
     handoff: bool = False,
@@ -94,7 +95,8 @@ def record_turn(
             "hazard_rules": getattr(rule_hazard, "kind", None),
             "hazard_model": getattr(draft, "hazard", None),
             "hazard_final": hazard_final,
-            "policy_rule": getattr(decision, "rule", None),
+            # The guardrail that replaced the reply, or the clarity step that asked instead.
+            "policy_rule": getattr(decision, "rule", None) or rule,
             "urgency": urgency,
             "escalation_reason": getattr(decision, "escalation_reason", None),
             "handoff": handoff,
@@ -139,6 +141,9 @@ def summarise(calls: list[dict]) -> dict:
         "hazards": dict(Counter(c.get("hazard_final") for c in calls if c.get("hazard_final"))),
         "policy_rules": dict(Counter(c.get("policy_rule") for c in calls if c.get("policy_rule"))),
         "hazard_disagreements": len(disagreements),
+        # The model's own intent (Gemini/Claude), and how often the bot asked instead of guessing.
+        "model_intents": dict(Counter(i for i in (_model_intent(c) for c in calls) if i)),
+        "clarified": sum(1 for c in calls if str(c.get("policy_rule") or "").startswith("clarify:")),
         "prompt_versions": dict(Counter(c.get("prompt_version") or "none" for c in calls)),
     }
 
@@ -173,6 +178,11 @@ def export_rows(calls: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+def _model_intent(call: dict) -> str | None:
+    raw = _loads(call.get("raw_output_json"))
+    return raw.get("intent") if isinstance(raw, dict) and isinstance(raw.get("intent"), str) else None
 
 
 def _percentile(sorted_values: list[int], pct: int) -> int | None:

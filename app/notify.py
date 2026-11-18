@@ -70,6 +70,7 @@ _REASON_HEADLINES = {
     "abusive": "Upset customer",
     "hot_lead": "Hot lead ready to book",
     "human_requested": "Customer asked for a person",
+    "unclear_request": "Bot couldn't work out what the customer needs",
 }
 
 

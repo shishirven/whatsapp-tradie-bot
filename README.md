@@ -172,6 +172,34 @@ docker run --rm --name whatsapp-tradie-bot -p 8000:8000 --env-file .env -v whats
 
 The image stores SQLite at `/data/tradie.db`. Leave `SQLITE_PATH` commented out in `.env` so that path is not overridden. The process listens on `PORT` (8000 if unset).
 
+## Unclear messages
+
+Before intake reads a message, `app/clarity.py` decides whether it is a clear request for electrical work. On every turn, the model's `record_job_intake` call also returns an `intent` and, when needed, a `clarifying_question`. The possible intents are:
+- `service_request`
+- `answer`
+- `question`
+- `follow_up`
+- `greeting`
+- `vague_request`
+- `unclear`
+- `not_electrical`
+
+| Message | Intent | What happens |
+| --- | --- | --- |
+| "hha", "asdf", "?" | unclear | The bot asks what they need an electrician for, with examples. Nothing is stored. |
+| "need an electrician" | vague_request | The bot asks what the electrical job is. Only confirmed facts are kept, such as a configured suburb. |
+| "my toilet is blocked" | not_electrical | The bot politely says it's electricians only. No job is created. |
+| "do you work weekends?", "hi", "I want a full refund" | question / greeting | The reply stands, but free text is never stored as a job type or suburb. |
+
+Who decides, strongest first:
+1. **Deterministic evidence:** a hazard, a guardrail reply, a configured job word, a slot or menu number, a configured suburb when the suburb was asked, a visit or cancel request, or a request for a person.
+2. **The model's `intent`.**
+3. **Keyword rules,** used offline.
+
+The rules can overrule the model only in the direction of asking, for example when gibberish is labelled as a job.
+
+If a customer sends a second unclear message in a row, the bot replies with a numbered menu of the configured jobs. A third hands the chat to a person (`unclear_request`), and the owner is alerted. Each clarifying turn is recorded in `llm_calls` as `policy_rule = clarify:<intent>`. The `summary` command counts these turns and the model's intents.
+
 ## Owner alerts
 
 When a customer reports a hazard, complains, asks for a person, or becomes a hot lead, the bot sends an alert to the owner's own WhatsApp:

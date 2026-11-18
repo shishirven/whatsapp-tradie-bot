@@ -322,13 +322,19 @@ def empty_intake() -> dict:
 
 
 def normalise_intake(raw: dict | None) -> dict:
-    """Copy the probe / waive cursor. Unknown keys are dropped."""
+    """Copy the probe / waive cursor and the clarification state. Unknown keys are dropped."""
     source = raw or {}
     state = empty_intake()
     for key in ("probed", "waived"):
         for item in source.get(key) or []:
             if item in _BY_KEY and item not in state[key]:
                 state[key].append(item)
+    streak = source.get("clarify_streak")
+    if isinstance(streak, int) and not isinstance(streak, bool) and streak > 0:
+        state["clarify_streak"] = streak
+    menu = source.get("job_menu")
+    if isinstance(menu, list) and menu and all(isinstance(item, str) for item in menu):
+        state["job_menu"] = list(menu)
     return state
 
 
