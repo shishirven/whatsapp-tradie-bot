@@ -78,6 +78,8 @@ _ELECTRICAL = re.compile(
 )
 # Other trades and things we don't do. A hazard check runs first, so water near electrics still wins.
 _OTHER_TRADE = re.compile(
+    r"(?:leak\w*|drip\w*)[^.!?]{0,30}\b(?:taps?|pipes?|toilet|cistern|gutters?)\b|"
+    r"\b(?:taps?|pipes?)\b[^.!?]{0,20}(?:leak\w*|drip\w*)|"
     r"\b(?:plumb\w*|toilet|blocked (?:drain|sink|toilet|pipe)|drains?|leaking (?:tap|pipe|roof)|dripping tap|"
     r"gutters?|roof(?:er|ing)?|tiles? (?:need|to be)|tiling|tiler|paint(?:er|ing)|carpet\w*|carpenter|"
     r"locksmith|locked out|pest\w*|termites?|lawn\w*|garden(?:er|ing)|landscap\w*|fence repair|"
@@ -112,6 +114,7 @@ def assess(
     menu_choice: str | None = None,
     wants_person: bool = False,
     opened_new_job: bool = False,
+    previous: str | None = None,
 ) -> Assessment:
     """The final intent for one message, with deterministic evidence first, then the model, then rules.
 
@@ -138,6 +141,9 @@ def assess(
     ):
         # Rules may overrule the model only towards asking: a clarifying question is cheap, a junk job isn't.
         intent, source = "unclear", "rules"
+    if intent == "unclear" and source == "rules" and previous and _same(previous, text):
+        # They sent the same thing again after we said we didn't catch it: believe them.
+        intent = "answer"
     # A guardrail reply or a person stepping in already answers the message: never clarify over it.
     clarify = intent in CLARIFY and not handled and not wants_person
     return Assessment(intent=intent, source=source, clarify=clarify, strict=intent in STRICT)
@@ -199,10 +205,15 @@ def rule_intent(text: str | None, *, known: dict, pending: list[str], business: 
         return "greeting"
     if _OTHER_TRADE.search(lowered):
         return "not_electrical"
-    if _VAGUE.search(lowered) and not _ELECTRICAL.search(lowered.replace("electrician", "")):
+    if _VAGUE.search(lowered) and not _ELECTRICAL.search(_VAGUE.sub(" ", lowered)):
+        # "need some electrical stuff done": the only electrical word is in the vague phrase itself.
         return "vague_request"
     if _ELECTRICAL.search(lowered):
         return "service_request" if not job_known else "answer"
+    if job_known and pending[:1] == ["suburb"] and len(words) == 1 and len(words[0]) <= 3 and raw == raw.lower():
+        # "hha" for the suburb. A real short suburb typed in capitals ("Kew") is an answer, and a
+        # customer who repeats a lowercase one is believed (see `assess`).
+        return "unclear"
     if job_known:
         # Mid-intake, a plain answer to "what name?" or "what's going on?" is given the benefit of the doubt.
         if ("contact_name" in pending and _NAME_ANSWER.match(lowered)) or len(words) >= 3:
@@ -214,6 +225,10 @@ def rule_intent(text: str | None, *, known: dict, pending: list[str], business: 
     if len(words) <= 3:
         return "unclear"
     return "vague_request"
+
+
+def _same(left: str | None, right: str | None) -> bool:
+    return " ".join((left or "").casefold().split()) == " ".join((right or "").casefold().split())
 
 
 def looks_like_gibberish(lowered: str, *, short_is_unclear: bool = True) -> bool:

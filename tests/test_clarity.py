@@ -169,9 +169,14 @@ def test_an_unclear_answer_mid_intake_repeats_the_question(tmp_path):
     assert second["lead"]["job_type"] == "power_point"  # what was on file stays
 
 
-def test_a_three_letter_suburb_is_fine_mid_conversation_offline():
+def test_a_short_suburb_mid_conversation_offline():
     business = load_business()
-    assert rule_intent("kew", known={"job_type": "power_point"}, pending=["suburb"], business=business) == "answer"
+    known = {"job_type": "power_point"}
+    assert rule_intent("Kew", known=known, pending=["suburb"], business=business) == "answer"
+    assert rule_intent("hha", known=known, pending=["suburb"], business=business) == "unclear"
+    # Repeated after we said we didn't catch it: believed.
+    repeated = assess("kew", model_intent=None, known=known, pending=["suburb"], business=business, previous="kew")
+    assert repeated.intent == "answer"
     assert looks_like_gibberish("kew") and not looks_like_gibberish("kew", short_is_unclear=False)
 
 
